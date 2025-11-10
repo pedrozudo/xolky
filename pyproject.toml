@@ -12,7 +12,7 @@ name = "xolky"
 version = "0.0.1"
 description = "xolky: Solve linear systems using sparse Cholesky decomposition with cuDSS in Jax within jitted functions."
 authors = [
-    { name = "Pedro Zuidberg Dos Martires" }
+    { name ="Pedro Zuidberg Dos Martires"}
 ]
 dependencies = [
     "jax[cuda12]>=0.7.1",
