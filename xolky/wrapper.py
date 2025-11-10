@@ -71,7 +71,7 @@ class SparseCholesky:
             "xolky_solve",
             jax.ShapeDtypeStruct((ncols,), jnp.float32),
         )
-        self._solve = jax.jit(functools.partial(_solve, address=self.address()))
+        self._solve = functools.partial(_solve, address=self.address())
 
         self._init_structure(
             self.csr_indcs,

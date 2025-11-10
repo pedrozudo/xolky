@@ -43,9 +43,11 @@ if __name__ == "__main__":
     print(f"number of non-zeros: {nse}")
     print(f"number of columns: {size}")
 
+    csr_data = csr_data.astype(jnp.float32).astype(jnp.float64)
     A = jsparse.CSR((csr_data, csr_inds, csr_ptrs), shape=csr_shape)
 
     b = jnp.ones(csr_shape[0], jnp.float64)
+    b = b.astype(jnp.float32).astype(jnp.float64)
 
     ########################################
     ########################################
@@ -60,13 +62,14 @@ if __name__ == "__main__":
     ########################################
     ########################################
 
-    b = b.astype(jnp.float32).astype(jnp.float64)
-    # csr_data = csr_data.astype(jnp.float32).astype(jnp.float64)
+    b = b.astype(jnp.float32)
+    csr_data = csr_data.astype(jnp.float32)
+
+    jax.block_until_ready(b)
+    jax.block_until_ready(csr_data)
 
     print(jnp.max(csr_data))
     print(jnp.min(csr_data))
-
-    exit()
 
     solver = xolky.SparseCholesky(size, nse, csr_inds, csr_ptrs)
 
@@ -79,10 +82,8 @@ if __name__ == "__main__":
     with time_block("Factorize"):
         solver.factorize(csr_data)
 
-    x = jnp.empty_like(b)
-    jax.block_until_ready(x)
     with time_block("Solve"):
-        solver.solve(x, b)
+        x = solver.solve(b)
 
     is_close = jnp.isclose(x, x_cg).all()
     print(f"CuDSS and CG solutions match: {is_close}")

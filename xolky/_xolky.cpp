@@ -306,9 +306,8 @@ XLA_FFI_DEFINE_HANDLER(XolkySolve, XolkySolveImpl,
                            .Ctx<ffi::PlatformStream<cudaStream_t>>()
                            .Attr<int64_t>("address")
                            .Arg<ffi::Buffer<ffi::F32>>()
-                           .Ret<ffi::Buffer<ffi::F32>>()
-                       //  ,{xla::ffi::Traits::kCmdBufferCompatible}
-);
+                           .Ret<ffi::Buffer<ffi::F32>>(),
+                       {xla::ffi::Traits::kCmdBufferCompatible});
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
