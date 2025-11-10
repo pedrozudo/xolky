@@ -1,4 +1,4 @@
-# Xolky
+# Xolky (/ˈʃɔl.ki/)
 Solve linear systems using sparse Cholesky decomposition with cuDSS in Jax within jitted functions.
 
 
