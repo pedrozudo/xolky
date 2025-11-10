@@ -122,7 +122,7 @@ ext_modules = [
         name="xolky._xolky",
         sources=[
             "xolky/_xolky.cpp",
-            "xolky/_cast_kernels.cu",
+            "xolky/_cast.cu",
         ],
         include_dirs=[
             pybind11.get_include(),

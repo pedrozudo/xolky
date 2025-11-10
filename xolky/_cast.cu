@@ -47,5 +47,5 @@ void downcast_f64_to_f32(const double* f64_dev,
 }
 
 #ifdef __CUDACC__
-#pragma message("_cast_kernels.cu compiled with NVCC")
+#pragma message("_cast.cu compiled with NVCC")
 #endif
