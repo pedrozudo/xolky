@@ -1,0 +1,23 @@
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "wheel",
+    "pybind11>=2.5.0",
+    "jax[cuda12]>=0.7.1"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xolky"
+version = "0.0.1"
+description = "xolky: Solve linear systems using sparse Cholesky decomposition with JAX arrays and CuDss."
+authors = [
+    { name = "Pedro Zuidberg Dos Martires" }
+]
+dependencies = [
+    "jax[cuda12]>=0.7.1",
+    "pybind11>=2.5.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
