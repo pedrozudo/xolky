@@ -1,6 +1,21 @@
+import time
+from contextlib import contextmanager
+
+
+import jax
 import jax.numpy as jnp
 import jax.experimental.sparse as jsparse
 import xolky
+
+
+@contextmanager
+def time_block(label="Block"):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        end = time.perf_counter()
+        print(f"{label} took {end - start:.4f} seconds")
 
 
 def main():
@@ -46,13 +61,17 @@ def main():
     csr_data = A1.data
     solver.factorize(csr_data)
 
-    x1_sparse = solver.solve(b1)
+    solver.solve = jax.jit(solver.solve)
+
+    with time_block("Solve 1"):
+        x1_sparse = solver.solve(b1)
 
     ################################################################
 
     csr_data = A2.data
     solver.refactorize(csr_data)
-    x2_sparse = solver.solve(b2)
+    with time_block("Solve 2"):
+        x2_sparse = solver.solve(b2)
 
     ################################################################
 
