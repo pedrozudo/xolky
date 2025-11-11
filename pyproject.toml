@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xolky"
-version = "0.0.1"
+version = "0.0.2"
 description = "xolky: Solve linear systems using sparse Cholesky decomposition with cuDSS in Jax within jitted functions."
 authors = [
     { name ="Pedro Zuidberg Dos Martires"}
