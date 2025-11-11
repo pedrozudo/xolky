@@ -43,11 +43,8 @@ if __name__ == "__main__":
     print(f"number of non-zeros: {nse}")
     print(f"number of columns: {size}")
 
-    csr_data = csr_data.astype(jnp.float32).astype(jnp.float64)
     A = jsparse.CSR((csr_data, csr_inds, csr_ptrs), shape=csr_shape)
-
     b = jnp.ones(csr_shape[0], jnp.float64)
-    b = b.astype(jnp.float32).astype(jnp.float64)
 
     ########################################
     ########################################
@@ -61,9 +58,6 @@ if __name__ == "__main__":
     ########################################
     ########################################
     ########################################
-
-    b = b.astype(jnp.float32)
-    csr_data = csr_data.astype(jnp.float32)
 
     jax.block_until_ready(b)
     jax.block_until_ready(csr_data)

@@ -5,8 +5,6 @@
 #include <cudss.h>
 #include <pybind11/pybind11.h>
 
-#include "_cast.cuh"
-
 #include <iostream>
 
 namespace py = pybind11;
@@ -32,27 +30,28 @@ namespace ffi = xla::ffi;
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <typename T>
-inline void print_device_array(const T *d_ptr, int N,
-                               const char *label = "val") {
-  static_assert(std::is_same<T, float>::value || std::is_same<T, double>::value,
-                "Only float and double are supported in this printer.");
+// template <typename T>
+// inline void print_device_array(const T *d_ptr, int N,
+//                                const char *label = "val") {
+//   static_assert(std::is_same<T, float>::value || std::is_same<T,
+//   double>::value,
+//                 "Only float and double are supported in this printer.");
 
-  // Allocate host buffer
-  std::vector<T> h_buf(N);
+//   // Allocate host buffer
+//   std::vector<T> h_buf(N);
 
-  // Copy device -> host
-  cudaMemcpy(h_buf.data(), d_ptr, N * sizeof(T), cudaMemcpyDeviceToHost);
+//   // Copy device -> host
+//   cudaMemcpy(h_buf.data(), d_ptr, N * sizeof(T), cudaMemcpyDeviceToHost);
 
-  // Print with appropriate format
-  for (int i = 0; i < N; i++) {
-    if constexpr (std::is_same<T, float>::value) {
-      printf("%s[%d] = %.6f\n", label, i, h_buf[i]);
-    } else if constexpr (std::is_same<T, double>::value) {
-      printf("%s[%d] = %.6lf\n", label, i, h_buf[i]);
-    }
-  }
-}
+//   // Print with appropriate format
+//   for (int i = 0; i < N; i++) {
+//     if constexpr (std::is_same<T, float>::value) {
+//       printf("%s[%d] = %.6f\n", label, i, h_buf[i]);
+//     } else if constexpr (std::is_same<T, double>::value) {
+//       printf("%s[%d] = %.6lf\n", label, i, h_buf[i]);
+//     }
+//   }
+// }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -176,10 +175,6 @@ static ffi::Error XolkyInitStructureImpl(cudaStream_t stream, int64_t address,
   CUDA_CHECK(cudaMalloc((void **)&h->x_64_, ncols * sizeof(double)));
   CUDA_CHECK(cudaMalloc((void **)&h->b_64_, ncols * sizeof(double)));
 
-  cudssMatrixSetValues(h->A_, h->csr_values_64_);
-  cudssMatrixSetValues(h->x_, h->x_64_);
-  cudssMatrixSetValues(h->b_, h->b_64_);
-
   return ffi::Error::Success();
 }
 
@@ -239,16 +234,11 @@ XLA_FFI_DEFINE_HANDLER(XolkyAnalyze, XolkyAnalyzeImpl,
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static ffi::Error XolkyFactorizeImpl(cudaStream_t stream, int64_t address,
-                                     ffi::Buffer<ffi::F32> csr_values) {
-
+                                     ffi::Buffer<ffi::F64> csr_values) {
   auto h = fetchCuDssSparseCholeskyHostPtr(stream, address);
-
-  upcast_f32_to_f64(csr_values.typed_data(), h->csr_values_64_,
-                    csr_values.element_count(), stream);
-
+  cudssMatrixSetValues(h->A_, csr_values.typed_data());
   // print_device_array(csr_values.typed_data(), csr_values.element_count());
   // print_device_array(h->csr_values_64_, csr_values.element_count());
-
   cudssExecute(h->handle_, CUDSS_PHASE_FACTORIZATION, h->config_, h->data_,
                h->A_, NULL, NULL);
   return ffi::Error::Success();
@@ -258,7 +248,7 @@ XLA_FFI_DEFINE_HANDLER(XolkyFactorize, XolkyFactorizeImpl,
                        ffi::Ffi::Bind()
                            .Ctx<ffi::PlatformStream<cudaStream_t>>()
                            .Attr<int64_t>("address")
-                           .Arg<ffi::Buffer<ffi::F32>>());
+                           .Arg<ffi::Buffer<ffi::F64>>());
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -266,12 +256,9 @@ XLA_FFI_DEFINE_HANDLER(XolkyFactorize, XolkyFactorizeImpl,
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static ffi::Error XolkyRefactorizeImpl(cudaStream_t stream, int64_t address,
-                                       ffi::Buffer<ffi::F32> csr_values) {
+                                       ffi::Buffer<ffi::F64> csr_values) {
   auto h = fetchCuDssSparseCholeskyHostPtr(stream, address);
-
-  upcast_f32_to_f64(csr_values.typed_data(), h->csr_values_64_,
-                    csr_values.element_count(), stream);
-
+  cudssMatrixSetValues(h->A_, csr_values.typed_data());
   cudssExecute(h->handle_, CUDSS_PHASE_REFACTORIZATION, h->config_, h->data_,
                h->A_, NULL, NULL);
   return ffi::Error::Success();
@@ -281,7 +268,7 @@ XLA_FFI_DEFINE_HANDLER(XolkyRefactorize, XolkyRefactorizeImpl,
                        ffi::Ffi::Bind()
                            .Ctx<ffi::PlatformStream<cudaStream_t>>()
                            .Attr<int64_t>("address")
-                           .Arg<ffi::Buffer<ffi::F32>>());
+                           .Arg<ffi::Buffer<ffi::F64>>());
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -289,15 +276,13 @@ XLA_FFI_DEFINE_HANDLER(XolkyRefactorize, XolkyRefactorizeImpl,
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static ffi::Error XolkySolveImpl(cudaStream_t stream, int64_t address,
-                                 ffi::Buffer<ffi::F32> b,
-                                 ffi::ResultBuffer<ffi::F32> x) {
+                                 ffi::Buffer<ffi::F64> b,
+                                 ffi::ResultBuffer<ffi::F64> x) {
   auto h = fetchCuDssSparseCholeskyHostPtr(stream, address);
-
-  upcast_f32_to_f64(b.typed_data(), h->b_64_, b.element_count(), stream);
-
+  cudssMatrixSetValues(h->b_, b.typed_data());
+  cudssMatrixSetValues(h->x_, x->typed_data());
   cudssExecute(h->handle_, CUDSS_PHASE_SOLVE, h->config_, h->data_, h->A_,
                h->x_, h->b_);
-  downcast_f64_to_f32(h->x_64_, x->typed_data(), b.element_count(), stream);
   return ffi::Error::Success();
 }
 
@@ -305,8 +290,8 @@ XLA_FFI_DEFINE_HANDLER(XolkySolve, XolkySolveImpl,
                        ffi::Ffi::Bind()
                            .Ctx<ffi::PlatformStream<cudaStream_t>>()
                            .Attr<int64_t>("address")
-                           .Arg<ffi::Buffer<ffi::F32>>()
-                           .Ret<ffi::Buffer<ffi::F32>>(),
+                           .Arg<ffi::Buffer<ffi::F64>>()
+                           .Ret<ffi::Buffer<ffi::F64>>(),
                        {xla::ffi::Traits::kCmdBufferCompatible});
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////

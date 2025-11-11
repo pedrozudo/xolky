@@ -69,7 +69,7 @@ class SparseCholesky:
 
         _solve = jffi.ffi_call(
             "xolky_solve",
-            jax.ShapeDtypeStruct((ncols,), jnp.float32),
+            jax.ShapeDtypeStruct((ncols,), jnp.float64),
         )
         self._solve = functools.partial(_solve, address=self.address())
 
@@ -91,10 +91,14 @@ class SparseCholesky:
         self._analyze()
 
     def factorize(self, csr_data):
-        self._factorize(csr_data)
+        with jax.enable_x64():
+            self._factorize(csr_data.astype(jnp.float64))
 
     def refactorize(self, csr_data):
-        self._refactorize(csr_data)
+        with jax.enable_x64():
+            self._factorize(csr_data.astype(jnp.float64))
 
     def solve(self, b):
-        return self._solve(b)
+        with jax.enable_x64():
+            x = self._solve(b.astype(jnp.float64))
+        return x
