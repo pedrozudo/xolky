@@ -122,6 +122,8 @@ public:
   std::intptr_t address() const { return reinterpret_cast<int64_t>(this); }
 };
 
+// TODO look into statefull calls
+// https://github.com/openxla/xla/blob/737a7da3c5405583dc95773ac0bb11b1349fc9ea/xla/service/gpu/custom_call_test.cc#L794-L845
 CuDssSparseCholesky *fetchCuDssSparseCholeskyHostPtr(cudaStream_t stream,
                                                      int64_t address) {
   return reinterpret_cast<CuDssSparseCholesky *>(address);
@@ -268,13 +270,26 @@ static ffi::Error XolkySolveImpl(cudaStream_t stream, int64_t address,
   return ffi::Error::Success();
 }
 
-XLA_FFI_DEFINE_HANDLER(XolkySolve, XolkySolveImpl,
-                       ffi::Ffi::Bind()
-                           .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                           .Attr<int64_t>("address")
-                           .Arg<ffi::Buffer<ffi::F64>>()
-                           .Ret<ffi::Buffer<ffi::F64>>(),
-                       {xla::ffi::Traits::kCmdBufferCompatible});
+XLA_FFI_DEFINE_HANDLER(
+    XolkySolve, XolkySolveImpl,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Attr<int64_t>("address")
+        .Arg<ffi::Buffer<ffi::F64>>()
+        .Ret<ffi::Buffer<ffi::F64>>()
+    //  ,
+    //  {xla::ffi::Traits::kCmdBufferCompatible}
+    //  when the trait is on, there is probably some funky happening with the
+    //  CUDA graphs?
+    // at least some downstream examples complained about CUDA graph / streams
+    // not being terminated
+    //
+    //  jax.errors.JaxRuntimeError: INTERNAL: CUDA error: Failed to end stream
+    //  capture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED:
+    // operation failed due to a previous error during capture
+    //
+    // https://docs.nvidia.com/cuda/cudss/general.html#cuda-graphs-support
+);
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
