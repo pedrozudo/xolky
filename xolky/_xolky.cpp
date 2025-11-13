@@ -94,10 +94,6 @@ public:
   cudssMatrix_t x_{};
   cudssMatrix_t b_{};
 
-  double *csr_values_64_ = nullptr;
-  double *x_64_ = nullptr;
-  double *b_64_ = nullptr;
-
   CuDssSparseCholesky() {
     cudssCreate(&handle_);
     cudssConfigCreate(&config_);
@@ -112,16 +108,6 @@ public:
   }
 
   ~CuDssSparseCholesky() {
-    if (b_64_) {
-      cudaFree(b_64_);
-    }
-    if (x_64_) {
-      cudaFree(x_64_);
-    }
-    if (csr_values_64_) {
-      cudaFree(csr_values_64_);
-    }
-
     if (A_)
       cudssMatrixDestroy(A_);
     if (data_ && handle_)
@@ -170,10 +156,6 @@ static ffi::Error XolkyInitStructureImpl(cudaStream_t stream, int64_t address,
                       CUDSS_LAYOUT_COL_MAJOR);
   cudssMatrixCreateDn(&h->b_, ncols, n_rhs, ldb, NULL, CUDA_R_64F,
                       CUDSS_LAYOUT_COL_MAJOR);
-
-  CUDA_CHECK(cudaMalloc((void **)&h->csr_values_64_, nnz * sizeof(double)));
-  CUDA_CHECK(cudaMalloc((void **)&h->x_64_, ncols * sizeof(double)));
-  CUDA_CHECK(cudaMalloc((void **)&h->b_64_, ncols * sizeof(double)));
 
   return ffi::Error::Success();
 }
