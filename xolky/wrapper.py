@@ -101,4 +101,4 @@ class SparseCholesky:
     def solve(self, b):
         with jax.enable_x64():
             x = self._solve(b.astype(jnp.float64))
-        return x
+        return x.astype(b.dtype)
