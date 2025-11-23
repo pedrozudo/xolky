@@ -5,14 +5,20 @@ import pybind11
 import jaxlib
 
 
-def get_nvidia_path(subpath):
-    spec = importlib.util.find_spec("nvidia")
-    base = spec.submodule_search_locations[0]
+# def get_nvidia_path(subpath):
+#     spec = importlib.util.find_spec("nvidia")
+#     base = spec.submodule_search_locations[0]
+#     return os.path.join(base, subpath)
+
+
+def get_cuda_path(subpath):
+    base = "/usr/local/cuda"
     return os.path.join(base, subpath)
 
 
-def get_jaxlib_path():
-    return os.path.dirname(jaxlib.__file__)
+def get_jaxlib_path(subpath):
+    base = os.path.dirname(jaxlib.__file__)
+    return os.path.join(base, subpath)
 
 
 ext_modules = [
@@ -21,11 +27,12 @@ ext_modules = [
         sources=["xolky/_xolky.cpp"],
         include_dirs=[
             pybind11.get_include(),
-            os.path.join(get_jaxlib_path(), "include"),
+            get_jaxlib_path("include"),
+            get_cuda_path("include"),
             "xolky",
         ],
+        library_dirs=[get_cuda_path("lib64")],
         libraries=["cudart", "cudss"],
-        library_dirs=[get_nvidia_path("cuda_runtime/lib")],
         language="c++",
         extra_compile_args=["-O3", "-std=c++17", "-fPIC"],
     ),
