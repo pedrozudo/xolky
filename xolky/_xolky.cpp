@@ -316,3 +316,4 @@ PYBIND11_MODULE(_xolky, m) {
   m.def("refactorize", []() { return EncapsulateFfiCall(XolkyRefactorize); });
   m.def("solve", []() { return EncapsulateFfiCall(XolkySolve); });
   // TODO add a destructor
+}
