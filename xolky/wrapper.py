@@ -96,7 +96,7 @@ class SparseCholesky:
 
     def refactorize(self, csr_data):
         with jax.enable_x64():
-            self._refactorize(csr_data.astype(jnp.float64))
+            self._factorize(csr_data.astype(jnp.float64))
 
     def solve(self, b):
         with jax.enable_x64():
