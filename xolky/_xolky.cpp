@@ -287,27 +287,15 @@ static ffi::Error XolkySolveImpl(cudaStream_t stream, int64_t address,
   return ffi::Error::Success();
 }
 
-XLA_FFI_DEFINE_HANDLER(
-    XolkySolve, XolkySolveImpl,
-    ffi::Ffi::Bind()
-        .Ctx<ffi::PlatformStream<cudaStream_t>>()
-        .Attr<int64_t>("address")
-        .Arg<ffi::Token>()
-        .Arg<ffi::Buffer<ffi::F64>>()
-        .Ret<ffi::Token>()
-        .Ret<ffi::Buffer<ffi::F64>>(),
-    {xla::ffi::Traits::kCmdBufferCompatible}
-    //  when the trait is on, there is probably some funky happening with the
-    //  CUDA graphs?
-    // at least some downstream examples complained about CUDA graph / streams
-    // not being terminated
-    //
-    //  jax.errors.JaxRuntimeError: INTERNAL: CUDA error: Failed to end stream
-    //  capture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED:
-    // operation failed due to a previous error during capture
-    //
-    // https://docs.nvidia.com/cuda/cudss/general.html#cuda-graphs-support
-);
+XLA_FFI_DEFINE_HANDLER(XolkySolve, XolkySolveImpl,
+                       ffi::Ffi::Bind()
+                           .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                           .Attr<int64_t>("address")
+                           .Arg<ffi::Token>()
+                           .Arg<ffi::Buffer<ffi::F64>>()
+                           .Ret<ffi::Token>()
+                           .Ret<ffi::Buffer<ffi::F64>>(),
+                       {xla::ffi::Traits::kCmdBufferCompatible});
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
