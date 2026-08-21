@@ -65,7 +65,7 @@ if __name__ == "__main__":
     print(jnp.max(csr_data))
     print(jnp.min(csr_data))
 
-    solver = xolky.SparseCholesky(size, nse, csr_inds, csr_ptrs)
+    solver = xolky.SparseCholesky(csr_inds, csr_ptrs)
 
     with time_block("Reorder"):
         solver.reorder()

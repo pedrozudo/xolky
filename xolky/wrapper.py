@@ -19,14 +19,16 @@ jffi.register_ffi_target("xolky_solve", _xolky.solve(), platform="CUDA")
 
 
 class SparseCholesky:
-    def __init__(self, ncols, nnz, csr_indices, csr_indptr):
-        assert csr_indices.dtype == jnp.int32, "csr_indices must be int32 type"
-        assert csr_indptr.dtype == jnp.int32, "csr_intptr must be int32 type"
+    def __init__(self, csr_indices, csr_indptr):
+        if csr_indices.dtype != jnp.int32:
+            raise TypeError("csr_indices must have dtype int32")
+        if csr_indptr.dtype != jnp.int32:
+            raise TypeError("csr_indptr must have dtype int32")
 
-        self.ncols = ncols
-        self.nnz = nnz
-        self.csr_indcs = csr_indices
-        self.csr_ptrs = csr_indptr
+        self.n = csr_indptr.shape[0] - 1
+        self.nnz = csr_indices.shape[0]
+        self.csr_indices = csr_indices
+        self.csr_indptr = csr_indptr
 
         self._solver = _xolky.CuDssSparseCholesky()
 
@@ -69,15 +71,15 @@ class SparseCholesky:
 
         _solve = jffi.ffi_call(
             "xolky_solve",
-            jax.ShapeDtypeStruct((ncols,), jnp.float64),
+            jax.ShapeDtypeStruct((self.n,), jnp.float64),
+            has_side_effect=True,
         )
         self._solve = functools.partial(_solve, address=self.address())
 
         self._init_structure(
-            self.csr_indcs,
-            self.csr_ptrs,
-            address=self.address(),
-            ncols=self.ncols,
+            self.csr_indices,
+            self.csr_indptr,
+            ncols=self.n,
             nnz=self.nnz,
         )
 

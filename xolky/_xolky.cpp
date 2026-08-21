@@ -88,6 +88,7 @@ public:
   cudssHandle_t handle_{};
   cudssConfig_t config_{};
   cudssData_t data_{};
+  cudssMemPool pool_{};
   cudssDeviceMemHandler_t mem_handler_{};
 
   cudssMatrix_t A_{};
@@ -99,8 +100,7 @@ public:
     cudssConfigCreate(&config_);
     cudssDataCreate(handle_, &data_);
 
-    cudssMemPool pool = cudssMemPool();
-    mem_handler_.ctx = reinterpret_cast<void *>(&pool);
+    mem_handler_.ctx = &pool_;
     mem_handler_.device_alloc = cudss_alloc;
     mem_handler_.device_free = cudss_dealloc;
 
@@ -108,6 +108,10 @@ public:
   }
 
   ~CuDssSparseCholesky() {
+    if (b_)
+      cudssMatrixDestroy(b_);
+    if (x_)
+      cudssMatrixDestroy(x_);
     if (A_)
       cudssMatrixDestroy(A_);
     if (data_ && handle_)
@@ -124,8 +128,7 @@ public:
 
 // TODO look into statefull calls
 // https://github.com/openxla/xla/blob/737a7da3c5405583dc95773ac0bb11b1349fc9ea/xla/service/gpu/custom_call_test.cc#L794-L845
-CuDssSparseCholesky *fetchCuDssSparseCholeskyHostPtr(cudaStream_t stream,
-                                                     int64_t address) {
+CuDssSparseCholesky *fetchCuDssSparseCholeskyHostPtr(int64_t address) {
   return reinterpret_cast<CuDssSparseCholesky *>(address);
 }
 
@@ -138,7 +141,7 @@ static ffi::Error XolkyInitStructureImpl(cudaStream_t stream, int64_t address,
                                          int64_t ncols, int64_t nnz,
                                          ffi::Buffer<ffi::S32> csr_indices,
                                          ffi::Buffer<ffi::S32> csr_indptr) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(stream, address);
+  auto h = fetchCuDssSparseCholeskyHostPtr(address);
   cudssSetStream(h->handle_, stream);
 
   int32_t *indptr = csr_indptr.typed_data();
@@ -177,7 +180,8 @@ XLA_FFI_DEFINE_HANDLER(XolkyInitStructure, XolkyInitStructureImpl,
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static ffi::Error XolkyReorderImpl(cudaStream_t stream, int64_t address) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(stream, address);
+  auto h = fetchCuDssSparseCholeskyHostPtr(address);
+  cudssSetStream(h->handle_, stream);
 
   // Set ordering to METIS
   // https://docs.nvidia.com/cuda/cudss/types.html#cudssconfigparam-t
@@ -201,7 +205,8 @@ XLA_FFI_DEFINE_HANDLER(XolkyReorder, XolkyReorderImpl,
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static ffi::Error XolkyAnalyzeImpl(cudaStream_t stream, int64_t address) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(stream, address);
+  auto h = fetchCuDssSparseCholeskyHostPtr(address);
+  cudssSetStream(h->handle_, stream);
   cudssExecute(h->handle_, CUDSS_PHASE_SYMBOLIC_FACTORIZATION, h->config_,
                h->data_, h->A_, NULL, NULL);
   return ffi::Error::Success();
@@ -219,7 +224,8 @@ XLA_FFI_DEFINE_HANDLER(XolkyAnalyze, XolkyAnalyzeImpl,
 
 static ffi::Error XolkyFactorizeImpl(cudaStream_t stream, int64_t address,
                                      ffi::Buffer<ffi::F64> csr_values) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(stream, address);
+  auto h = fetchCuDssSparseCholeskyHostPtr(address);
+  cudssSetStream(h->handle_, stream);
   cudssMatrixSetValues(h->A_, csr_values.typed_data());
   // print_device_array(csr_values.typed_data(), csr_values.element_count());
   // print_device_array(h->csr_values_64_, csr_values.element_count());
@@ -241,7 +247,8 @@ XLA_FFI_DEFINE_HANDLER(XolkyFactorize, XolkyFactorizeImpl,
 
 static ffi::Error XolkyRefactorizeImpl(cudaStream_t stream, int64_t address,
                                        ffi::Buffer<ffi::F64> csr_values) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(stream, address);
+  auto h = fetchCuDssSparseCholeskyHostPtr(address);
+  cudssSetStream(h->handle_, stream);
   cudssMatrixSetValues(h->A_, csr_values.typed_data());
   cudssExecute(h->handle_, CUDSS_PHASE_REFACTORIZATION, h->config_, h->data_,
                h->A_, NULL, NULL);
@@ -262,7 +269,8 @@ XLA_FFI_DEFINE_HANDLER(XolkyRefactorize, XolkyRefactorizeImpl,
 static ffi::Error XolkySolveImpl(cudaStream_t stream, int64_t address,
                                  ffi::Buffer<ffi::F64> b,
                                  ffi::ResultBuffer<ffi::F64> x) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(stream, address);
+  auto h = fetchCuDssSparseCholeskyHostPtr(address);
+  cudssSetStream(h->handle_, stream);
   cudssMatrixSetValues(h->b_, b.typed_data());
   cudssMatrixSetValues(h->x_, x->typed_data());
   cudssExecute(h->handle_, CUDSS_PHASE_SOLVE, h->config_, h->data_, h->A_,
@@ -315,5 +323,4 @@ PYBIND11_MODULE(_xolky, m) {
   m.def("factorize", []() { return EncapsulateFfiCall(XolkyFactorize); });
   m.def("refactorize", []() { return EncapsulateFfiCall(XolkyRefactorize); });
   m.def("solve", []() { return EncapsulateFfiCall(XolkySolve); });
-  // TODO add a destructor
 }

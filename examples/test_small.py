@@ -10,14 +10,11 @@ def solve(p):
 
     A = jsparse.csr_fromdense(A)
 
-    size = A.shape[0]
-    nse = A.nse
-
     csr_inds = A.indices
     csr_ptrs = A.indptr
     csr_data = A.data
 
-    solver = xolky.SparseCholesky(size, nse, csr_inds, csr_ptrs)
+    solver = xolky.SparseCholesky(csr_inds, csr_ptrs)
     print()
 
     solver.reorder()

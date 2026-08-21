@@ -29,7 +29,6 @@ def main():
     b2 = jnp.array([3.0, 1.0, 2.0])
 
     n_rows = b1.shape[0]
-    nzz = data1.shape[0]
 
     ################################################################
 
@@ -51,7 +50,7 @@ def main():
     csr_inds = A1.indices
     csr_ptrs = A1.indptr
 
-    solver = xolky.SparseCholesky(n_rows, nzz, csr_inds, csr_ptrs)
+    solver = xolky.SparseCholesky(csr_inds, csr_ptrs)
 
     solver.reorder()
     solver.analyze()
