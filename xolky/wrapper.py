@@ -57,21 +57,24 @@ class SparseCholesky:
 
         _factorize = jffi.ffi_call(
             "xolky_factorize",
-            result_shape_dtypes=[],
+            jffi.abstract_token,
             has_side_effect=True,
         )
         self._factorize = functools.partial(_factorize, address=self.address())
 
         _refactorize = jffi.ffi_call(
             "xolky_refactorize",
-            result_shape_dtypes=[],
+            jffi.abstract_token,
             has_side_effect=True,
         )
         self._refactorize = functools.partial(_refactorize, address=self.address())
 
         _solve = jffi.ffi_call(
             "xolky_solve",
-            jax.ShapeDtypeStruct((self.n,), jnp.float64),
+            (
+                jffi.abstract_token,
+                jax.ShapeDtypeStruct((self.n,), jnp.float64),
+            ),
             has_side_effect=True,
         )
         self._solve = functools.partial(_solve, address=self.address())
@@ -92,15 +95,17 @@ class SparseCholesky:
     def analyze(self):
         self._analyze()
 
-    def factorize(self, csr_data):
+    def factorize(self, token, csr_data):
         with jax.enable_x64():
-            self._factorize(csr_data.astype(jnp.float64))
+            token = self._factorize(token, csr_data.astype(jnp.float64))
+        return token
 
-    def refactorize(self, csr_data):
+    def refactorize(self, token, csr_data):
         with jax.enable_x64():
-            self._refactorize(csr_data.astype(jnp.float64))
+            token = self._refactorize(token, csr_data.astype(jnp.float64))
+        return token
 
-    def solve(self, b):
+    def solve(self, token, b):
         with jax.enable_x64():
-            x = self._solve(b.astype(jnp.float64)).astype(b.dtype)
-        return x
+            token, x = self._solve(token, b.astype(jnp.float64))
+        return token, x.astype(b.dtype)

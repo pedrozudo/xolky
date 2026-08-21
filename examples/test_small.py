@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import jax.experimental.sparse as jsparse
 import xolky
@@ -19,8 +20,9 @@ def solve(p):
 
     solver.reorder()
     solver.analyze()
-    solver.factorize(csr_data)
-    x_sparse = solver.solve(p[3])
+    token = jax.lax.create_token()
+    token = solver.factorize(token, csr_data)
+    token, x_sparse = solver.solve(token, p[3])
     return x_dense, x_sparse
 
 

@@ -58,19 +58,21 @@ def main():
     ################################################################
 
     csr_data = A1.data
-    solver.factorize(csr_data)
+    token = jax.lax.create_token()
+    token = solver.factorize(token, csr_data)
 
     solver.solve = jax.jit(solver.solve)
 
     with time_block("Solve 1"):
-        x1_sparse = solver.solve(b1)
+        token = x1_sparse = solver.solve(token, b1)
 
     ################################################################
 
     csr_data = A2.data
-    solver.refactorize(csr_data)
+    token = jax.lax.create_token()
+    token = solver.refactorize(token, csr_data)
     with time_block("Solve 2"):
-        x2_sparse = solver.solve(b2)
+        token, x2_sparse = solver.solve(token, b2)
 
     ################################################################
 

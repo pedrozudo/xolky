@@ -223,7 +223,9 @@ XLA_FFI_DEFINE_HANDLER(XolkyAnalyze, XolkyAnalyzeImpl,
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static ffi::Error XolkyFactorizeImpl(cudaStream_t stream, int64_t address,
-                                     ffi::Buffer<ffi::F64> csr_values) {
+                                     ffi::Token token,
+                                     ffi::Buffer<ffi::F64> csr_values,
+                                     ffi::Result<ffi::Token> token_out) {
   auto h = fetchCuDssSparseCholeskyHostPtr(address);
   cudssSetStream(h->handle_, stream);
   cudssMatrixSetValues(h->A_, csr_values.typed_data());
@@ -238,7 +240,9 @@ XLA_FFI_DEFINE_HANDLER(XolkyFactorize, XolkyFactorizeImpl,
                        ffi::Ffi::Bind()
                            .Ctx<ffi::PlatformStream<cudaStream_t>>()
                            .Attr<int64_t>("address")
-                           .Arg<ffi::Buffer<ffi::F64>>());
+                           .Arg<ffi::Token>()
+                           .Arg<ffi::Buffer<ffi::F64>>()
+                           .Ret<ffi::Token>());
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -246,7 +250,9 @@ XLA_FFI_DEFINE_HANDLER(XolkyFactorize, XolkyFactorizeImpl,
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static ffi::Error XolkyRefactorizeImpl(cudaStream_t stream, int64_t address,
-                                       ffi::Buffer<ffi::F64> csr_values) {
+                                       ffi::Token token,
+                                       ffi::Buffer<ffi::F64> csr_values,
+                                       ffi::Result<ffi::Token> token_out) {
   auto h = fetchCuDssSparseCholeskyHostPtr(address);
   cudssSetStream(h->handle_, stream);
   cudssMatrixSetValues(h->A_, csr_values.typed_data());
@@ -259,7 +265,9 @@ XLA_FFI_DEFINE_HANDLER(XolkyRefactorize, XolkyRefactorizeImpl,
                        ffi::Ffi::Bind()
                            .Ctx<ffi::PlatformStream<cudaStream_t>>()
                            .Attr<int64_t>("address")
-                           .Arg<ffi::Buffer<ffi::F64>>());
+                           .Arg<ffi::Token>()
+                           .Arg<ffi::Buffer<ffi::F64>>()
+                           .Ret<ffi::Token>());
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -267,7 +275,8 @@ XLA_FFI_DEFINE_HANDLER(XolkyRefactorize, XolkyRefactorizeImpl,
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static ffi::Error XolkySolveImpl(cudaStream_t stream, int64_t address,
-                                 ffi::Buffer<ffi::F64> b,
+                                 ffi::Token token, ffi::Buffer<ffi::F64> b,
+                                 ffi::Result<ffi::Token> token_out,
                                  ffi::ResultBuffer<ffi::F64> x) {
   auto h = fetchCuDssSparseCholeskyHostPtr(address);
   cudssSetStream(h->handle_, stream);
@@ -283,7 +292,9 @@ XLA_FFI_DEFINE_HANDLER(
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<cudaStream_t>>()
         .Attr<int64_t>("address")
+        .Arg<ffi::Token>()
         .Arg<ffi::Buffer<ffi::F64>>()
+        .Ret<ffi::Token>()
         .Ret<ffi::Buffer<ffi::F64>>()
     //  ,
     //  {xla::ffi::Traits::kCmdBufferCompatible}
