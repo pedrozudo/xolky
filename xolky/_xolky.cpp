@@ -295,9 +295,8 @@ XLA_FFI_DEFINE_HANDLER(
         .Arg<ffi::Token>()
         .Arg<ffi::Buffer<ffi::F64>>()
         .Ret<ffi::Token>()
-        .Ret<ffi::Buffer<ffi::F64>>()
-    //  ,
-    //  {xla::ffi::Traits::kCmdBufferCompatible}
+        .Ret<ffi::Buffer<ffi::F64>>(),
+    {xla::ffi::Traits::kCmdBufferCompatible}
     //  when the trait is on, there is probably some funky happening with the
     //  CUDA graphs?
     // at least some downstream examples complained about CUDA graph / streams
