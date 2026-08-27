@@ -65,21 +65,13 @@ if __name__ == "__main__":
     print(jnp.max(csr_data))
     print(jnp.min(csr_data))
 
-    token = jax.lax.create_token()
-
-    solver = xolky.SparseCholesky(csr_inds, csr_ptrs)
-
-    with time_block("Reorder"):
-        solver.reorder()
-
-    with time_block("Analyze"):
-        solver.analyze()
-
-    with time_block("Factorize"):
-        token = solver.factorize(token, csr_data)
+    solver = xolky.setup(csr_inds, csr_ptrs)
+    with time_block("Refactor"):
+        solver = xolky.refactor(solver, csr_data)
 
     with time_block("Solve"):
-        token, x = solver.solve(token, b)
+        solver, x = xolky.solve(solver, b)
 
     is_close = jnp.isclose(x, x_cg).all()
     print(f"CuDSS and CG solutions match: {is_close}")
+    solver.close()

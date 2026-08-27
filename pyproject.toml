@@ -3,21 +3,30 @@ requires = [
     "setuptools>=61.0",
     "wheel",
     "pybind11>=2.5.0",
-    "jax[cuda13]>=0.8.0"
+    "jax[cuda13]>=0.11.1"
 ]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "xolky"
-version = "0.0.3"
-description = "xolky: Solve linear systems using sparse Cholesky decomposition with cuDSS in Jax within jitted functions."
+version = "0.1.0"
+description = "Sparse Cholesky solves with cuDSS from JAX-compiled functions."
 authors = [
-    { name ="Pedro Zuidberg Dos Martires"}
+    { name = "Pedro Zuidberg Dos Martires" }
 ]
 dependencies = [
-    "jax[cuda13]>=0.8.0",
+    "jax[cuda13]>=0.11.1",
+    "numpy>=2.0",
     "pybind11>=2.5.0"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=9.0"
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

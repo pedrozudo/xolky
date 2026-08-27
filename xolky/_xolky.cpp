@@ -5,320 +5,525 @@
 #include <cudss.h>
 #include <pybind11/pybind11.h>
 
-#include <iostream>
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
 
 namespace py = pybind11;
 namespace ffi = xla::ffi;
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
+namespace {
 
-#define CUDA_CHECK(call)                                                       \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << " — "  \
-                << cudaGetErrorString(err) << " (" << err << ")" << std::endl; \
-      std::exit(EXIT_FAILURE);                                                 \
-    }                                                                          \
-  } while (0)
+using SolverId = std::uint64_t;
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-// template <typename T>
-// inline void print_device_array(const T *d_ptr, int N,
-//                                const char *label = "val") {
-//   static_assert(std::is_same<T, float>::value || std::is_same<T,
-//   double>::value,
-//                 "Only float and double are supported in this printer.");
-
-//   // Allocate host buffer
-//   std::vector<T> h_buf(N);
-
-//   // Copy device -> host
-//   cudaMemcpy(h_buf.data(), d_ptr, N * sizeof(T), cudaMemcpyDeviceToHost);
-
-//   // Print with appropriate format
-//   for (int i = 0; i < N; i++) {
-//     if constexpr (std::is_same<T, float>::value) {
-//       printf("%s[%d] = %.6f\n", label, i, h_buf[i]);
-//     } else if constexpr (std::is_same<T, double>::value) {
-//       printf("%s[%d] = %.6lf\n", label, i, h_buf[i]);
-//     }
-//   }
-// }
-
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-struct cudssMemPool {
-public:
-  int alloc(void **ptr, size_t size, cudaStream_t stream) {
-    // printf("alloc() from the ExampleDeviceMemPool allocates memory at %p "
-    //        "(allocation size %zu)\n",
-    //        (void *)*ptr, size);
-    int status = cudaMallocAsync(ptr, size, stream);
-    return status;
-  }
-
-  int dealloc(void *ptr, size_t size, cudaStream_t stream) {
-    int status = cudaFreeAsync(ptr, stream);
-    return status;
-  }
-};
-
-int cudss_alloc(void *ctx, void **ptr, size_t size, cudaStream_t stream) {
-  return reinterpret_cast<cudssMemPool *>(ctx)->alloc(ptr, size, stream);
+std::string CudaErrorMessage(cudaError_t status, const char *operation) {
+  std::ostringstream message;
+  message << operation << " failed: " << cudaGetErrorString(status) << " ("
+          << static_cast<int>(status) << ")";
+  return message.str();
 }
 
-int cudss_dealloc(void *ctx, void *ptr, size_t size, cudaStream_t stream) {
-  return reinterpret_cast<cudssMemPool *>(ctx)->dealloc(ptr, size, stream);
+std::string CudssErrorMessage(cudssStatus_t status, const char *operation) {
+  std::ostringstream message;
+  message << operation << " failed with cuDSS status "
+          << static_cast<int>(status);
+  return message.str();
 }
 
-struct CuDssSparseCholesky {
-
-public:
-  cudssHandle_t handle_{};
-  cudssConfig_t config_{};
-  cudssData_t data_{};
-  cudssMemPool pool_{};
-  cudssDeviceMemHandler_t mem_handler_{};
-
-  cudssMatrix_t A_{};
-  cudssMatrix_t x_{};
-  cudssMatrix_t b_{};
-
-  CuDssSparseCholesky() {
-    cudssCreate(&handle_);
-    cudssConfigCreate(&config_);
-    cudssDataCreate(handle_, &data_);
-
-    mem_handler_.ctx = &pool_;
-    mem_handler_.device_alloc = cudss_alloc;
-    mem_handler_.device_free = cudss_dealloc;
-
-    cudssSetDeviceMemHandler(handle_, &mem_handler_);
+void CheckCuda(cudaError_t status, const char *operation) {
+  if (status != cudaSuccess) {
+    throw std::runtime_error(CudaErrorMessage(status, operation));
   }
+}
 
-  ~CuDssSparseCholesky() {
-    if (b_)
-      cudssMatrixDestroy(b_);
-    if (x_)
-      cudssMatrixDestroy(x_);
-    if (A_)
-      cudssMatrixDestroy(A_);
-    if (data_ && handle_)
-      cudssDataDestroy(handle_, data_);
-    if (config_) {
-      cudssConfigDestroy(config_);
+void CheckCudss(cudssStatus_t status, const char *operation) {
+  if (status != CUDSS_STATUS_SUCCESS) {
+    throw std::runtime_error(CudssErrorMessage(status, operation));
+  }
+}
+
+class DeviceGuard {
+public:
+  explicit DeviceGuard(int device) {
+    CheckCuda(cudaGetDevice(&previous_device_), "cudaGetDevice");
+    if (previous_device_ != device) {
+      CheckCuda(cudaSetDevice(device), "cudaSetDevice");
+      restore_ = true;
     }
-    if (handle_)
-      cudssDestroy(handle_);
   }
 
-  std::intptr_t address() const { return reinterpret_cast<int64_t>(this); }
+  ~DeviceGuard() {
+    if (restore_) {
+      cudaSetDevice(previous_device_);
+    }
+  }
+
+  DeviceGuard(const DeviceGuard &) = delete;
+  DeviceGuard &operator=(const DeviceGuard &) = delete;
+
+private:
+  int previous_device_ = 0;
+  bool restore_ = false;
 };
 
-// TODO look into statefull calls
-// https://github.com/openxla/xla/blob/737a7da3c5405583dc95773ac0bb11b1349fc9ea/xla/service/gpu/custom_call_test.cc#L794-L845
-CuDssSparseCholesky *fetchCuDssSparseCholeskyHostPtr(int64_t address) {
-  return reinterpret_cast<CuDssSparseCholesky *>(address);
+struct SolverEntry {
+  SolverEntry(int64_t n_value, int64_t nnz_value, int device_value)
+      : n(n_value), nnz(nnz_value), device_ordinal(device_value) {}
+
+  SolverEntry(const SolverEntry &) = delete;
+  SolverEntry &operator=(const SolverEntry &) = delete;
+
+  void InitializeResources() {
+    DeviceGuard guard(device_ordinal);
+
+    CheckCuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
+              "cudaStreamCreateWithFlags");
+    CheckCuda(cudaEventCreateWithFlags(&input_ready, cudaEventDisableTiming),
+              "cudaEventCreateWithFlags(input_ready)");
+    CheckCuda(cudaEventCreateWithFlags(&output_ready, cudaEventDisableTiming),
+              "cudaEventCreateWithFlags(output_ready)");
+
+    CheckCuda(cudaMalloc(reinterpret_cast<void **>(&csr_indices),
+                         static_cast<size_t>(nnz) * sizeof(int32_t)),
+              "cudaMalloc(csr_indices)");
+    CheckCuda(cudaMalloc(reinterpret_cast<void **>(&csr_indptr),
+                         static_cast<size_t>(n + 1) * sizeof(int32_t)),
+              "cudaMalloc(csr_indptr)");
+    CheckCuda(cudaMalloc(reinterpret_cast<void **>(&csr_values),
+                         static_cast<size_t>(nnz) * sizeof(double)),
+              "cudaMalloc(csr_values)");
+    CheckCuda(cudaMalloc(reinterpret_cast<void **>(&rhs),
+                         static_cast<size_t>(n) * sizeof(double)),
+              "cudaMalloc(rhs)");
+    CheckCuda(cudaMalloc(reinterpret_cast<void **>(&solution),
+                         static_cast<size_t>(n) * sizeof(double)),
+              "cudaMalloc(solution)");
+
+    CheckCudss(cudssCreate(&handle), "cudssCreate");
+    CheckCudss(cudssConfigCreate(&config), "cudssConfigCreate");
+    CheckCudss(cudssDataCreate(handle, &data), "cudssDataCreate");
+    CheckCudss(cudssSetStream(handle, stream), "cudssSetStream");
+
+    CheckCudss(
+        cudssMatrixCreateCsr(&matrix, n, n, nnz, csr_indptr, nullptr,
+                             csr_indices, csr_values, CUDA_R_32I, CUDA_R_64F,
+                             CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER,
+                             CUDSS_BASE_ZERO),
+        "cudssMatrixCreateCsr");
+    CheckCudss(cudssMatrixCreateDn(&solution_matrix, n, 1, n, solution,
+                                   CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
+               "cudssMatrixCreateDn(solution)");
+    CheckCudss(cudssMatrixCreateDn(&rhs_matrix, n, 1, n, rhs, CUDA_R_64F,
+                                   CUDSS_LAYOUT_COL_MAJOR),
+               "cudssMatrixCreateDn(rhs)");
+  }
+
+  ~SolverEntry() noexcept {
+    int current_device = 0;
+    bool restore_device = false;
+    if (cudaGetDevice(&current_device) == cudaSuccess &&
+        current_device != device_ordinal) {
+      cudaSetDevice(device_ordinal);
+      restore_device = true;
+    }
+
+    if (stream != nullptr) {
+      cudaStreamSynchronize(stream);
+    }
+
+    if (rhs_matrix != nullptr) {
+      cudssMatrixDestroy(rhs_matrix);
+    }
+    if (solution_matrix != nullptr) {
+      cudssMatrixDestroy(solution_matrix);
+    }
+    if (matrix != nullptr) {
+      cudssMatrixDestroy(matrix);
+    }
+    if (data != nullptr && handle != nullptr) {
+      cudssDataDestroy(handle, data);
+    }
+    if (config != nullptr) {
+      cudssConfigDestroy(config);
+    }
+    if (handle != nullptr) {
+      cudssDestroy(handle);
+    }
+
+    if (csr_indices != nullptr) {
+      cudaFree(csr_indices);
+    }
+    if (csr_indptr != nullptr) {
+      cudaFree(csr_indptr);
+    }
+    if (csr_values != nullptr) {
+      cudaFree(csr_values);
+    }
+    if (rhs != nullptr) {
+      cudaFree(rhs);
+    }
+    if (solution != nullptr) {
+      cudaFree(solution);
+    }
+    if (input_ready != nullptr) {
+      cudaEventDestroy(input_ready);
+    }
+    if (output_ready != nullptr) {
+      cudaEventDestroy(output_ready);
+    }
+    if (stream != nullptr) {
+      cudaStreamDestroy(stream);
+    }
+    if (restore_device) {
+      cudaSetDevice(current_device);
+    }
+  }
+
+  int64_t n;
+  int64_t nnz;
+  int device_ordinal;
+
+  cudssHandle_t handle{};
+  cudssConfig_t config{};
+  cudssData_t data{};
+  cudssMatrix_t matrix{};
+  cudssMatrix_t solution_matrix{};
+  cudssMatrix_t rhs_matrix{};
+
+  int32_t *csr_indices = nullptr;
+  int32_t *csr_indptr = nullptr;
+  double *csr_values = nullptr;
+  double *rhs = nullptr;
+  double *solution = nullptr;
+
+  cudaStream_t stream = nullptr;
+  cudaEvent_t input_ready = nullptr;
+  cudaEvent_t output_ready = nullptr;
+
+  bool initialized = false;
+  bool factorized = false;
+  std::mutex mutex;
+};
+
+class SolverRegistry {
+public:
+  SolverId Create(int64_t n, int64_t nnz, int device_ordinal) {
+    if (n <= 0) {
+      throw std::invalid_argument("n must be positive");
+    }
+    if (nnz <= 0) {
+      throw std::invalid_argument("nnz must be positive");
+    }
+
+    auto entry = std::make_shared<SolverEntry>(n, nnz, device_ordinal);
+    entry->InitializeResources();
+
+    SolverId id = next_id_.fetch_add(1, std::memory_order_relaxed);
+    if (id == 0) {
+      throw std::overflow_error("xolky solver identifier space exhausted");
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    solvers_.emplace(id, std::move(entry));
+    return id;
+  }
+
+  std::shared_ptr<SolverEntry> Get(SolverId id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto iterator = solvers_.find(id);
+    if (iterator == solvers_.end()) {
+      throw std::invalid_argument("unknown or closed xolky solver identifier " +
+                                  std::to_string(id));
+    }
+    return iterator->second;
+  }
+
+  bool Destroy(SolverId id) {
+    std::shared_ptr<SolverEntry> entry;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      auto iterator = solvers_.find(id);
+      if (iterator == solvers_.end()) {
+        return false;
+      }
+      entry = std::move(iterator->second);
+      solvers_.erase(iterator);
+    }
+    return true;
+  }
+
+  void Clear() {
+    std::unordered_map<SolverId, std::shared_ptr<SolverEntry>> entries;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      entries.swap(solvers_);
+    }
+  }
+
+  size_t Size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return solvers_.size();
+  }
+
+private:
+  std::atomic<SolverId> next_id_{1};
+  mutable std::mutex mutex_;
+  std::unordered_map<SolverId, std::shared_ptr<SolverEntry>> solvers_;
+};
+
+SolverRegistry &Registry() {
+  static auto *registry = new SolverRegistry();
+  return *registry;
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-static ffi::Error XolkyInitStructureImpl(cudaStream_t stream, int64_t address,
-                                         int64_t ncols, int64_t nnz,
-                                         ffi::Buffer<ffi::S32> csr_indices,
-                                         ffi::Buffer<ffi::S32> csr_indptr) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(address);
-  cudssSetStream(h->handle_, stream);
-
-  int32_t *indptr = csr_indptr.typed_data();
-  int32_t *indices = csr_indices.typed_data();
-
-  cudssMatrixCreateCsr(&h->A_, ncols, ncols, nnz, static_cast<void *>(indptr),
-                       NULL, static_cast<void *>(indices), NULL, CUDA_R_32I,
-                       CUDA_R_64F, CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER,
-                       CUDSS_BASE_ZERO);
-
-  int64_t n_rhs = 1;
-  int64_t n_rows = ncols;
-  int64_t ldx = ncols;
-  int64_t ldb = n_rows;
-
-  cudssMatrixCreateDn(&h->x_, ncols, n_rhs, ldx, NULL, CUDA_R_64F,
-                      CUDSS_LAYOUT_COL_MAJOR);
-  cudssMatrixCreateDn(&h->b_, ncols, n_rhs, ldb, NULL, CUDA_R_64F,
-                      CUDSS_LAYOUT_COL_MAJOR);
-
-  return ffi::Error::Success();
+SolverId ReadSolverId(ffi::BufferR0<ffi::DataType::U64> solver_id) {
+  auto *pointer = solver_id.typed_data();
+  cudaPointerAttributes attributes{};
+  cudaError_t status = cudaPointerGetAttributes(&attributes, pointer);
+  if (status != cudaSuccess) {
+    cudaGetLastError();
+    throw std::invalid_argument(
+        "solver_id must be a uint64 scalar in pinned host memory");
+  }
+  if (attributes.type != cudaMemoryTypeHost &&
+      attributes.type != cudaMemoryTypeManaged) {
+    throw std::invalid_argument(
+        "solver_id must be a uint64 scalar in pinned host memory");
+  }
+  SolverId id = *pointer;
+  if (id == 0) {
+    throw std::invalid_argument("solver identifier 0 is invalid");
+  }
+  return id;
 }
 
-XLA_FFI_DEFINE_HANDLER(XolkyInitStructure, XolkyInitStructureImpl,
-                       ffi::Ffi::Bind()
-                           .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                           .Attr<int64_t>("address")
-                           .Attr<int64_t>("ncols")
-                           .Attr<int64_t>("nnz")
-                           .Arg<ffi::Buffer<ffi::S32>>()
-                           .Arg<ffi::Buffer<ffi::S32>>());
-
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-static ffi::Error XolkyReorderImpl(cudaStream_t stream, int64_t address) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(address);
-  cudssSetStream(h->handle_, stream);
-
-  // Set ordering to METIS
-  // https://docs.nvidia.com/cuda/cudss/types.html#cudssconfigparam-t
-  cudssAlgType_t reorder_alg = CUDSS_ALG_DEFAULT;
-  cudssConfigSet(h->config_, CUDSS_CONFIG_REORDERING_ALG, &reorder_alg,
-                 sizeof(cudssAlgType_t));
-  cudssExecute(h->handle_, CUDSS_PHASE_REORDERING, h->config_, h->data_, h->A_,
-               NULL, NULL);
-
-  return ffi::Error::Success();
+void ValidateDevice(const SolverEntry &entry, int32_t device_ordinal) {
+  if (entry.device_ordinal != device_ordinal) {
+    throw std::invalid_argument(
+        "solver belongs to CUDA device " +
+        std::to_string(entry.device_ordinal) + " but the FFI call executes on " +
+        std::to_string(device_ordinal));
+  }
 }
 
-XLA_FFI_DEFINE_HANDLER(XolkyReorder, XolkyReorderImpl,
-                       ffi::Ffi::Bind()
-                           .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                           .Attr<int64_t>("address"));
-
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-static ffi::Error XolkyAnalyzeImpl(cudaStream_t stream, int64_t address) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(address);
-  cudssSetStream(h->handle_, stream);
-  cudssExecute(h->handle_, CUDSS_PHASE_SYMBOLIC_FACTORIZATION, h->config_,
-               h->data_, h->A_, NULL, NULL);
-  return ffi::Error::Success();
+void BeginOperation(SolverEntry &entry, cudaStream_t caller_stream) {
+  CheckCuda(cudaEventRecord(entry.input_ready, caller_stream),
+            "cudaEventRecord(input_ready)");
+  CheckCuda(cudaStreamWaitEvent(entry.stream, entry.input_ready, 0),
+            "cudaStreamWaitEvent(input_ready)");
 }
 
-XLA_FFI_DEFINE_HANDLER(XolkyAnalyze, XolkyAnalyzeImpl,
-                       ffi::Ffi::Bind()
-                           .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                           .Attr<int64_t>("address"));
-
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-static ffi::Error XolkyFactorizeImpl(cudaStream_t stream, int64_t address,
-                                     ffi::Token token,
-                                     ffi::Buffer<ffi::F64> csr_values,
-                                     ffi::Result<ffi::Token> token_out) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(address);
-  cudssSetStream(h->handle_, stream);
-  cudssMatrixSetValues(h->A_, csr_values.typed_data());
-  // print_device_array(csr_values.typed_data(), csr_values.element_count());
-  // print_device_array(h->csr_values_64_, csr_values.element_count());
-  cudssExecute(h->handle_, CUDSS_PHASE_FACTORIZATION, h->config_, h->data_,
-               h->A_, NULL, NULL);
-  return ffi::Error::Success();
+void EndOperation(SolverEntry &entry, cudaStream_t caller_stream) {
+  CheckCuda(cudaEventRecord(entry.output_ready, entry.stream),
+            "cudaEventRecord(output_ready)");
+  CheckCuda(cudaStreamWaitEvent(caller_stream, entry.output_ready, 0),
+            "cudaStreamWaitEvent(output_ready)");
 }
 
-XLA_FFI_DEFINE_HANDLER(XolkyFactorize, XolkyFactorizeImpl,
-                       ffi::Ffi::Bind()
-                           .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                           .Attr<int64_t>("address")
-                           .Arg<ffi::Token>()
-                           .Arg<ffi::Buffer<ffi::F64>>()
-                           .Ret<ffi::Token>());
+ffi::Error SetupImpl(
+    cudaStream_t caller_stream, int32_t device_ordinal,
+    ffi::BufferR0<ffi::DataType::U64> solver_id,
+    ffi::BufferR0<ffi::DataType::U8> sequence,
+    ffi::BufferR1<ffi::DataType::S32> csr_indices,
+    ffi::BufferR1<ffi::DataType::S32> csr_indptr,
+    ffi::ResultBufferR0<ffi::DataType::U8> sequence_out) {
+  try {
+    SolverId id = ReadSolverId(solver_id);
+    auto entry = Registry().Get(id);
+    ValidateDevice(*entry, device_ordinal);
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
+    if (static_cast<int64_t>(csr_indices.element_count()) != entry->nnz) {
+      return ffi::Error::InvalidArgument("csr_indices has the wrong length");
+    }
+    if (static_cast<int64_t>(csr_indptr.element_count()) != entry->n + 1) {
+      return ffi::Error::InvalidArgument("csr_indptr has the wrong length");
+    }
 
-static ffi::Error XolkyRefactorizeImpl(cudaStream_t stream, int64_t address,
-                                       ffi::Token token,
-                                       ffi::Buffer<ffi::F64> csr_values,
-                                       ffi::Result<ffi::Token> token_out) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(address);
-  cudssSetStream(h->handle_, stream);
-  cudssMatrixSetValues(h->A_, csr_values.typed_data());
-  cudssExecute(h->handle_, CUDSS_PHASE_REFACTORIZATION, h->config_, h->data_,
-               h->A_, NULL, NULL);
-  return ffi::Error::Success();
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    if (entry->initialized) {
+      return ffi::Error::InvalidArgument("solver setup was already completed");
+    }
+
+    BeginOperation(*entry, caller_stream);
+    CheckCuda(cudaMemcpyAsync(entry->csr_indices, csr_indices.typed_data(),
+                              static_cast<size_t>(entry->nnz) * sizeof(int32_t),
+                              cudaMemcpyDeviceToDevice, entry->stream),
+              "cudaMemcpyAsync(csr_indices)");
+    CheckCuda(cudaMemcpyAsync(entry->csr_indptr, csr_indptr.typed_data(),
+                              static_cast<size_t>(entry->n + 1) * sizeof(int32_t),
+                              cudaMemcpyDeviceToDevice, entry->stream),
+              "cudaMemcpyAsync(csr_indptr)");
+
+    cudssAlgType_t reorder_algorithm = CUDSS_ALG_DEFAULT;
+    CheckCudss(cudssConfigSet(entry->config, CUDSS_CONFIG_REORDERING_ALG,
+                              &reorder_algorithm, sizeof(reorder_algorithm)),
+               "cudssConfigSet(CUDSS_CONFIG_REORDERING_ALG)");
+    CheckCudss(cudssExecute(entry->handle, CUDSS_PHASE_ANALYSIS, entry->config,
+                            entry->data, entry->matrix, nullptr, nullptr),
+               "cudssExecute(CUDSS_PHASE_ANALYSIS)");
+    EndOperation(*entry, caller_stream);
+
+    entry->initialized = true;
+    return ffi::Error::Success();
+  } catch (const std::invalid_argument &error) {
+    return ffi::Error::InvalidArgument(error.what());
+  } catch (const std::exception &error) {
+    return ffi::Error::Internal(error.what());
+  }
 }
 
-XLA_FFI_DEFINE_HANDLER(XolkyRefactorize, XolkyRefactorizeImpl,
-                       ffi::Ffi::Bind()
-                           .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                           .Attr<int64_t>("address")
-                           .Arg<ffi::Token>()
-                           .Arg<ffi::Buffer<ffi::F64>>()
-                           .Ret<ffi::Token>());
+XLA_FFI_DEFINE_HANDLER(
+    XolkySetup, SetupImpl,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Ctx<ffi::DeviceOrdinal>()
+        .Arg<ffi::BufferR0<ffi::DataType::U64>>()
+        .Arg<ffi::BufferR0<ffi::DataType::U8>>()
+        .Arg<ffi::BufferR1<ffi::DataType::S32>>()
+        .Arg<ffi::BufferR1<ffi::DataType::S32>>()
+        .Ret<ffi::BufferR0<ffi::DataType::U8>>());
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
+ffi::Error RefactorImpl(
+    cudaStream_t caller_stream, int32_t device_ordinal,
+    ffi::BufferR0<ffi::DataType::U64> solver_id,
+    ffi::BufferR0<ffi::DataType::U8> sequence,
+    ffi::BufferR1<ffi::DataType::F64> csr_values,
+    ffi::ResultBufferR0<ffi::DataType::U8> sequence_out) {
+  try {
+    SolverId id = ReadSolverId(solver_id);
+    auto entry = Registry().Get(id);
+    ValidateDevice(*entry, device_ordinal);
 
-static ffi::Error XolkySolveImpl(cudaStream_t stream, int64_t address,
-                                 ffi::Token token, ffi::Buffer<ffi::F64> b,
-                                 ffi::Result<ffi::Token> token_out,
-                                 ffi::ResultBuffer<ffi::F64> x) {
-  auto h = fetchCuDssSparseCholeskyHostPtr(address);
-  cudssSetStream(h->handle_, stream);
-  cudssMatrixSetValues(h->b_, b.typed_data());
-  cudssMatrixSetValues(h->x_, x->typed_data());
-  cudssExecute(h->handle_, CUDSS_PHASE_SOLVE, h->config_, h->data_, h->A_,
-               h->x_, h->b_);
-  return ffi::Error::Success();
+    if (static_cast<int64_t>(csr_values.element_count()) != entry->nnz) {
+      return ffi::Error::InvalidArgument("csr_values has the wrong length");
+    }
+
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    if (!entry->initialized) {
+      return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
+                        "solver setup has not completed");
+    }
+
+    BeginOperation(*entry, caller_stream);
+    CheckCuda(cudaMemcpyAsync(entry->csr_values, csr_values.typed_data(),
+                              static_cast<size_t>(entry->nnz) * sizeof(double),
+                              cudaMemcpyDeviceToDevice, entry->stream),
+              "cudaMemcpyAsync(csr_values)");
+
+    int phase = entry->factorized ? CUDSS_PHASE_REFACTORIZATION
+                                  : CUDSS_PHASE_FACTORIZATION;
+    CheckCudss(cudssExecute(entry->handle, phase, entry->config, entry->data,
+                            entry->matrix, nullptr, nullptr),
+               entry->factorized
+                   ? "cudssExecute(CUDSS_PHASE_REFACTORIZATION)"
+                   : "cudssExecute(CUDSS_PHASE_FACTORIZATION)");
+    EndOperation(*entry, caller_stream);
+
+    entry->factorized = true;
+    return ffi::Error::Success();
+  } catch (const std::invalid_argument &error) {
+    return ffi::Error::InvalidArgument(error.what());
+  } catch (const std::exception &error) {
+    return ffi::Error::Internal(error.what());
+  }
 }
 
-XLA_FFI_DEFINE_HANDLER(XolkySolve, XolkySolveImpl,
-                       ffi::Ffi::Bind()
-                           .Ctx<ffi::PlatformStream<cudaStream_t>>()
-                           .Attr<int64_t>("address")
-                           .Arg<ffi::Token>()
-                           .Arg<ffi::Buffer<ffi::F64>>()
-                           .Ret<ffi::Token>()
-                           .Ret<ffi::Buffer<ffi::F64>>(),
-                       {xla::ffi::Traits::kCmdBufferCompatible});
+XLA_FFI_DEFINE_HANDLER(
+    XolkyRefactor, RefactorImpl,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Ctx<ffi::DeviceOrdinal>()
+        .Arg<ffi::BufferR0<ffi::DataType::U64>>()
+        .Arg<ffi::BufferR0<ffi::DataType::U8>>()
+        .Arg<ffi::BufferR1<ffi::DataType::F64>>()
+        .Ret<ffi::BufferR0<ffi::DataType::U8>>());
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
+ffi::Error SolveImpl(
+    cudaStream_t caller_stream, int32_t device_ordinal,
+    ffi::BufferR0<ffi::DataType::U64> solver_id,
+    ffi::BufferR0<ffi::DataType::U8> sequence,
+    ffi::BufferR1<ffi::DataType::F64> right_hand_side,
+    ffi::ResultBufferR0<ffi::DataType::U8> sequence_out,
+    ffi::ResultBufferR1<ffi::DataType::F64> result) {
+  try {
+    SolverId id = ReadSolverId(solver_id);
+    auto entry = Registry().Get(id);
+    ValidateDevice(*entry, device_ordinal);
 
-template <typename T> py::capsule EncapsulateFfiCall(T *fn) {
-  // https://docs.jax.dev/en/latest/ffi.html#building-and-registering-an-ffi-handler
+    if (static_cast<int64_t>(right_hand_side.element_count()) != entry->n) {
+      return ffi::Error::InvalidArgument("right-hand side has the wrong length");
+    }
+    if (static_cast<int64_t>(result->element_count()) != entry->n) {
+      return ffi::Error::InvalidArgument("solution output has the wrong length");
+    }
+
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    if (!entry->factorized) {
+      return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
+                        "solver has not been factorized");
+    }
+
+    BeginOperation(*entry, caller_stream);
+    CheckCuda(cudaMemcpyAsync(entry->rhs, right_hand_side.typed_data(),
+                              static_cast<size_t>(entry->n) * sizeof(double),
+                              cudaMemcpyDeviceToDevice, entry->stream),
+              "cudaMemcpyAsync(rhs)");
+    CheckCudss(cudssExecute(entry->handle, CUDSS_PHASE_SOLVE, entry->config,
+                            entry->data, entry->matrix,
+                            entry->solution_matrix, entry->rhs_matrix),
+               "cudssExecute(CUDSS_PHASE_SOLVE)");
+    CheckCuda(cudaMemcpyAsync(result->typed_data(), entry->solution,
+                              static_cast<size_t>(entry->n) * sizeof(double),
+                              cudaMemcpyDeviceToDevice, entry->stream),
+              "cudaMemcpyAsync(solution)");
+    EndOperation(*entry, caller_stream);
+
+    return ffi::Error::Success();
+  } catch (const std::invalid_argument &error) {
+    return ffi::Error::InvalidArgument(error.what());
+  } catch (const std::exception &error) {
+    return ffi::Error::Internal(error.what());
+  }
+}
+
+XLA_FFI_DEFINE_HANDLER(
+    XolkySolve, SolveImpl,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Ctx<ffi::DeviceOrdinal>()
+        .Arg<ffi::BufferR0<ffi::DataType::U64>>()
+        .Arg<ffi::BufferR0<ffi::DataType::U8>>()
+        .Arg<ffi::BufferR1<ffi::DataType::F64>>()
+        .Ret<ffi::BufferR0<ffi::DataType::U8>>()
+        .Ret<ffi::BufferR1<ffi::DataType::F64>>());
+
+template <typename T> py::capsule EncapsulateFfiCall(T *function) {
   static_assert(std::is_invocable_r_v<XLA_FFI_Error *, T, XLA_FFI_CallFrame *>,
                 "Encapsulated function must be an XLA FFI handler");
-  return py::capsule(reinterpret_cast<void *>(fn));
+  return py::capsule(reinterpret_cast<void *>(function));
 }
 
-PYBIND11_MODULE(_xolky, m) {
-  py::class_<CuDssSparseCholesky>(m, "CuDssSparseCholesky")
-      .def(py::init<>())
-      .def("address", &CuDssSparseCholesky::address);
+} // namespace
 
-  m.def("init_structure",
-        []() { return EncapsulateFfiCall(XolkyInitStructure); });
-  m.def("reorder", []() { return EncapsulateFfiCall(XolkyReorder); });
-  m.def("analyze", []() { return EncapsulateFfiCall(XolkyAnalyze); });
-  m.def("factorize", []() { return EncapsulateFfiCall(XolkyFactorize); });
-  m.def("refactorize", []() { return EncapsulateFfiCall(XolkyRefactorize); });
-  m.def("solve", []() { return EncapsulateFfiCall(XolkySolve); });
+PYBIND11_MODULE(_xolky, module) {
+  module.def("create_solver", [](int64_t n, int64_t nnz, int device_ordinal) {
+    return Registry().Create(n, nnz, device_ordinal);
+  });
+  module.def("destroy_solver", [](SolverId id) {
+    if (!Registry().Destroy(id)) {
+      throw std::invalid_argument("unknown or closed xolky solver identifier " +
+                                  std::to_string(id));
+    }
+  });
+  module.def("shutdown", []() { Registry().Clear(); });
+  module.def("active_solver_count", []() { return Registry().Size(); });
+
+  module.def("setup", []() { return EncapsulateFfiCall(XolkySetup); });
+  module.def("refactor", []() { return EncapsulateFfiCall(XolkyRefactor); });
+  module.def("solve", []() { return EncapsulateFfiCall(XolkySolve); });
 }

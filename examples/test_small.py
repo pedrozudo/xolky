@@ -15,14 +15,10 @@ def solve(p):
     csr_ptrs = A.indptr
     csr_data = A.data
 
-    solver = xolky.SparseCholesky(csr_inds, csr_ptrs)
-    print()
-
-    solver.reorder()
-    solver.analyze()
-    token = jax.lax.create_token()
-    token = solver.factorize(token, csr_data)
-    token, x_sparse = solver.solve(token, p[3])
+    solver = xolky.setup(csr_inds, csr_ptrs)
+    solver = xolky.refactor(solver, csr_data)
+    solver, x_sparse = xolky.solve(solver, p[3])
+    solver.close()
     return x_dense, x_sparse
 
 

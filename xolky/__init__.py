@@ -1,4 +1,3 @@
-from . import _xolky
-from .wrapper import SparseCholesky
+from .wrapper import SparseCholesky, refactor, setup, solve
 
-__all__ = ["_xolky", "SparseCholesky"]
+__all__ = ["SparseCholesky", "setup", "refactor", "solve"]

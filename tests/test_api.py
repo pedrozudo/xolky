@@ -1,0 +1,104 @@
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+import xolky
+from xolky import _xolky
+
+from ._problems import device_problem
+
+
+def test_public_api_is_functional():
+    assert xolky.__all__ == ["SparseCholesky", "setup", "refactor", "solve"]
+    assert not hasattr(_xolky, "CuDssSparseCholesky")
+
+
+def test_solver_is_a_pytree_with_dynamic_runtime_state():
+    indices, indptr, _, _ = device_problem()
+    solver = xolky.setup(indices, indptr)
+    try:
+        leaves, tree = jax.tree.flatten(solver)
+
+        assert len(leaves) == 2
+        assert leaves[0].dtype == jnp.uint64
+        assert leaves[0].shape == ()
+        assert leaves[1].dtype == jnp.uint8
+        assert leaves[1].shape == ()
+        assert "SparseCholesky" in str(tree)
+        assert solver.n == 4
+        assert solver.nnz == 8
+        assert jax.typeof(solver.solver_id).memory_space.name == "Host"
+    finally:
+        solver.close()
+
+
+def test_setup_allocates_unique_ids_and_close_releases_resources():
+    indices, indptr, _, _ = device_problem()
+    first = xolky.setup(indices, indptr)
+    second = xolky.setup(indices, indptr)
+    try:
+        assert int(np.asarray(first.solver_id)) != int(np.asarray(second.solver_id))
+        assert _xolky.active_solver_count() == 2
+    finally:
+        first.close()
+        second.close()
+
+    assert _xolky.active_solver_count() == 0
+    with pytest.raises(ValueError, match="unknown or closed"):
+        first.close()
+
+
+@pytest.mark.parametrize(
+    ("indices", "indptr", "error", "message"),
+    [
+        (
+            jnp.array([[0]], dtype=jnp.int32),
+            jnp.array([0, 1], dtype=jnp.int32),
+            ValueError,
+            "one-dimensional",
+        ),
+        (
+            jnp.array([0], dtype=jnp.int64),
+            jnp.array([0, 1], dtype=jnp.int32),
+            TypeError,
+            "dtype int32",
+        ),
+        (
+            jnp.array([0], dtype=jnp.int32),
+            jnp.array([0], dtype=jnp.int32),
+            ValueError,
+            "non-empty",
+        ),
+    ],
+)
+def test_setup_validates_structure(indices, indptr, error, message):
+    with pytest.raises(error, match=message):
+        xolky.setup(indices, indptr)
+
+
+def test_setup_cannot_run_under_jax_transformations():
+    indices, indptr, _, _ = device_problem()
+
+    with pytest.raises(TypeError, match="JAX transformations"):
+        jax.jit(xolky.setup)(indices, indptr)
+
+    batched_indices = jnp.stack((indices, indices))
+    with pytest.raises(TypeError, match="JAX transformations"):
+        jax.vmap(lambda row: xolky.setup(row, indptr))(batched_indices)
+
+
+def test_runtime_argument_validation():
+    indices, indptr, values, _ = device_problem()
+    solver = xolky.setup(indices, indptr)
+    try:
+        with pytest.raises(ValueError, match="csr_values"):
+            xolky.refactor(solver, values[:-1])
+        with pytest.raises(TypeError, match="floating-point"):
+            xolky.refactor(solver, jnp.ones(solver.nnz, dtype=jnp.int32))
+        with pytest.raises(ValueError, match="right_hand_side"):
+            xolky.solve(solver, jnp.ones(solver.n + 1))
+        with pytest.raises(TypeError, match="floating-point"):
+            xolky.solve(solver, jnp.ones(solver.n, dtype=jnp.int32))
+    finally:
+        solver.close()

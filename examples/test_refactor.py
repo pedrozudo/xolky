@@ -50,29 +50,23 @@ def main():
     csr_inds = A1.indices
     csr_ptrs = A1.indptr
 
-    solver = xolky.SparseCholesky(csr_inds, csr_ptrs)
-
-    solver.reorder()
-    solver.analyze()
+    solver = xolky.setup(csr_inds, csr_ptrs)
 
     ################################################################
 
     csr_data = A1.data
-    token = jax.lax.create_token()
-    token = solver.factorize(token, csr_data)
-
-    solver.solve = jax.jit(solver.solve)
+    solver = xolky.refactor(solver, csr_data)
+    solve_jit = jax.jit(xolky.solve)
 
     with time_block("Solve 1"):
-        token = x1_sparse = solver.solve(token, b1)
+        solver, x1_sparse = solve_jit(solver, b1)
 
     ################################################################
 
     csr_data = A2.data
-    token = jax.lax.create_token()
-    token = solver.refactorize(token, csr_data)
+    solver = xolky.refactor(solver, csr_data)
     with time_block("Solve 2"):
-        token, x2_sparse = solver.solve(token, b2)
+        solver, x2_sparse = solve_jit(solver, b2)
 
     ################################################################
 
@@ -84,6 +78,7 @@ def main():
     print("Problem 2")
     print(f"Dense solution: {x2_dense}")
     print(f"Sparse solution: {x2_sparse}")
+    solver.close()
 
 
 if __name__ == "__main__":
