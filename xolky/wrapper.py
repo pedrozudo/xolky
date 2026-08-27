@@ -11,7 +11,15 @@ import jax.numpy as jnp
 import numpy as np
 from jax import ffi as jffi
 
-from . import _xolky
+try:
+    from . import _xolky
+except ImportError as error:
+    if "cudss" not in str(error).lower():
+        raise
+    raise ImportError(
+        "Xolky could not load cuDSS. Ensure libcuDSS and its dependencies are "
+        "visible to the dynamic loader, for example through LD_LIBRARY_PATH."
+    ) from error
 
 
 jffi.register_ffi_target("xolky_setup", _xolky.setup(), platform="CUDA")
@@ -41,7 +49,7 @@ class SparseCholesky:
     device_ordinal: int = field(metadata={"static": True})
 
     def close(self) -> None:
-        """Release all native CUDA and cuDSS resources owned by this solver."""
+        """Release native resources; repeated calls are harmless."""
         _xolky.destroy_solver(_concrete_solver_id(self))
 
     def __enter__(self) -> SparseCholesky:
@@ -205,9 +213,10 @@ def setup(csr_indices: Any, csr_indptr: Any) -> SparseCholesky:
                 np.uint64(native_id),
                 _host_sharding(indices_device.id),
             )
+            sequence_seed = jax.device_put(np.uint8(0), indices_device)
             sequence = _setup_call()(
                 solver_id,
-                jnp.asarray(0, dtype=jnp.uint8),
+                sequence_seed,
                 indices,
                 indptr,
             )

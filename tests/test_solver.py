@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import xolky
+from xolky import _xolky
 
 from ._problems import VALUES_1, VALUES_2, dense, device_problem
 
@@ -153,14 +154,45 @@ def test_solve_explicitly_rejects_vmap():
 
 
 def test_solve_before_factorization_reports_an_error():
-    indices, indptr, _, _ = device_problem()
+    indices, indptr, values, _ = device_problem()
     solver = xolky.setup(indices, indptr)
     try:
         with pytest.raises(jax.errors.JaxRuntimeError, match="not been factorized"):
             _, result = xolky.solve(solver, jnp.ones(solver.n))
             result.block_until_ready()
+
+        solver = xolky.refactor(solver, values)
+        solver, result = xolky.solve(solver, jnp.ones(solver.n))
+        np.testing.assert_allclose(
+            result,
+            np.linalg.solve(dense(VALUES_1), np.ones(solver.n)),
+        )
     finally:
         solver.close()
+
+
+def test_failed_solver_rejects_future_native_operations():
+    indices, indptr, values, _ = device_problem()
+    solver = xolky.setup(indices, indptr)
+    solver_id = int(np.asarray(solver.solver_id))
+    try:
+        _xolky._poison_solver_for_testing(solver_id)
+
+        with pytest.raises(
+            jax.errors.JaxRuntimeError,
+            match="solver is in a failed state; destroy and recreate it",
+        ):
+            failed = xolky.refactor(solver, values)
+            failed.sequence.block_until_ready()
+    finally:
+        solver.close()
+
+    replacement = xolky.setup(indices, indptr)
+    try:
+        replacement = xolky.refactor(replacement, values)
+        replacement.sequence.block_until_ready()
+    finally:
+        replacement.close()
 
 
 def test_same_solver_concurrent_solves_are_serialized_safely():
@@ -197,9 +229,17 @@ def test_closed_solver_identifier_is_rejected_by_native_registry():
     solver = xolky.setup(indices, indptr)
     solver.close()
 
-    with pytest.raises(jax.errors.JaxRuntimeError, match="unknown or closed"):
-        stale = xolky.refactor(solver, values)
-        stale.sequence.block_until_ready()
+    try:
+        with pytest.raises(jax.errors.JaxRuntimeError, match="unknown or closed"):
+            stale = xolky.refactor(solver, values)
+            stale.sequence.block_until_ready()
+    finally:
+        replacement = xolky.setup(indices, indptr)
+        try:
+            replacement = xolky.refactor(replacement, values)
+            replacement.sequence.block_until_ready()
+        finally:
+            replacement.close()
 
 
 def test_independent_solvers_can_execute_concurrently():

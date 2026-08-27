@@ -207,6 +207,7 @@ struct SolverEntry {
 
   bool initialized = false;
   bool factorized = false;
+  bool failed = false;
   std::mutex mutex;
 };
 
@@ -325,6 +326,43 @@ void EndOperation(SolverEntry &entry, cudaStream_t caller_stream) {
             "cudaStreamWaitEvent(output_ready)");
 }
 
+class OperationGuard {
+public:
+  explicit OperationGuard(SolverEntry &entry) : entry_(entry) {}
+
+  OperationGuard(const OperationGuard &) = delete;
+  OperationGuard &operator=(const OperationGuard &) = delete;
+
+  ~OperationGuard() {
+    if (started_ && !completed_) {
+      entry_.failed = true;
+    }
+  }
+
+  void Begin(cudaStream_t caller_stream) {
+    started_ = true;
+    BeginOperation(entry_, caller_stream);
+  }
+
+  void Complete(cudaStream_t caller_stream) {
+    EndOperation(entry_, caller_stream);
+    completed_ = true;
+  }
+
+private:
+  SolverEntry &entry_;
+  bool started_ = false;
+  bool completed_ = false;
+};
+
+// These handlers deliberately do not claim kCmdBufferCompatible. They use
+// solver-owned device allocations plus a private CUDA stream and event
+// handoffs. XLA's command-buffer-compatible FFI contract requires device
+// allocations to arrive as buffer arguments, and CUDA graph capture across
+// this private-stream boundary has not been established as safe. Keep the
+// trait disabled unless the native execution model changes and capture is
+// validated independently.
+
 ffi::Error SetupImpl(
     cudaStream_t caller_stream, int32_t device_ordinal,
     ffi::BufferR0<ffi::DataType::U64> solver_id,
@@ -345,11 +383,16 @@ ffi::Error SetupImpl(
     }
 
     std::lock_guard<std::mutex> lock(entry->mutex);
+    if (entry->failed) {
+      return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
+                        "solver is in a failed state; destroy and recreate it");
+    }
     if (entry->initialized) {
       return ffi::Error::InvalidArgument("solver setup was already completed");
     }
 
-    BeginOperation(*entry, caller_stream);
+    OperationGuard operation(*entry);
+    operation.Begin(caller_stream);
     CheckCuda(cudaMemcpyAsync(entry->csr_indices, csr_indices.typed_data(),
                               static_cast<size_t>(entry->nnz) * sizeof(int32_t),
                               cudaMemcpyDeviceToDevice, entry->stream),
@@ -366,7 +409,7 @@ ffi::Error SetupImpl(
     CheckCudss(cudssExecute(entry->handle, CUDSS_PHASE_ANALYSIS, entry->config,
                             entry->data, entry->matrix, nullptr, nullptr),
                "cudssExecute(CUDSS_PHASE_ANALYSIS)");
-    EndOperation(*entry, caller_stream);
+    operation.Complete(caller_stream);
 
     entry->initialized = true;
     return ffi::Error::Success();
@@ -404,12 +447,17 @@ ffi::Error RefactorImpl(
     }
 
     std::lock_guard<std::mutex> lock(entry->mutex);
+    if (entry->failed) {
+      return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
+                        "solver is in a failed state; destroy and recreate it");
+    }
     if (!entry->initialized) {
       return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
                         "solver setup has not completed");
     }
 
-    BeginOperation(*entry, caller_stream);
+    OperationGuard operation(*entry);
+    operation.Begin(caller_stream);
     CheckCuda(cudaMemcpyAsync(entry->csr_values, csr_values.typed_data(),
                               static_cast<size_t>(entry->nnz) * sizeof(double),
                               cudaMemcpyDeviceToDevice, entry->stream),
@@ -422,7 +470,7 @@ ffi::Error RefactorImpl(
                entry->factorized
                    ? "cudssExecute(CUDSS_PHASE_REFACTORIZATION)"
                    : "cudssExecute(CUDSS_PHASE_FACTORIZATION)");
-    EndOperation(*entry, caller_stream);
+    operation.Complete(caller_stream);
 
     entry->factorized = true;
     return ffi::Error::Success();
@@ -463,12 +511,17 @@ ffi::Error SolveImpl(
     }
 
     std::lock_guard<std::mutex> lock(entry->mutex);
+    if (entry->failed) {
+      return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
+                        "solver is in a failed state; destroy and recreate it");
+    }
     if (!entry->factorized) {
       return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
                         "solver has not been factorized");
     }
 
-    BeginOperation(*entry, caller_stream);
+    OperationGuard operation(*entry);
+    operation.Begin(caller_stream);
     CheckCuda(cudaMemcpyAsync(entry->rhs, right_hand_side.typed_data(),
                               static_cast<size_t>(entry->n) * sizeof(double),
                               cudaMemcpyDeviceToDevice, entry->stream),
@@ -481,7 +534,7 @@ ffi::Error SolveImpl(
                               static_cast<size_t>(entry->n) * sizeof(double),
                               cudaMemcpyDeviceToDevice, entry->stream),
               "cudaMemcpyAsync(solution)");
-    EndOperation(*entry, caller_stream);
+    operation.Complete(caller_stream);
 
     return ffi::Error::Success();
   } catch (const std::invalid_argument &error) {
@@ -514,14 +567,14 @@ PYBIND11_MODULE(_xolky, module) {
   module.def("create_solver", [](int64_t n, int64_t nnz, int device_ordinal) {
     return Registry().Create(n, nnz, device_ordinal);
   });
-  module.def("destroy_solver", [](SolverId id) {
-    if (!Registry().Destroy(id)) {
-      throw std::invalid_argument("unknown or closed xolky solver identifier " +
-                                  std::to_string(id));
-    }
-  });
+  module.def("destroy_solver", [](SolverId id) { Registry().Destroy(id); });
   module.def("shutdown", []() { Registry().Clear(); });
   module.def("active_solver_count", []() { return Registry().Size(); });
+  module.def("_poison_solver_for_testing", [](SolverId id) {
+    auto entry = Registry().Get(id);
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    entry->failed = true;
+  });
 
   module.def("setup", []() { return EncapsulateFfiCall(XolkySetup); });
   module.def("refactor", []() { return EncapsulateFfiCall(XolkyRefactor); });

@@ -29,6 +29,8 @@ def test_solver_is_a_pytree_with_dynamic_runtime_state():
         assert solver.n == 4
         assert solver.nnz == 8
         assert jax.typeof(solver.solver_id).memory_space.name == "Host"
+        assert jax.typeof(solver.sequence).memory_space.name == "Device"
+        assert solver.sequence.devices() == indices.devices()
     finally:
         solver.close()
 
@@ -45,8 +47,16 @@ def test_setup_allocates_unique_ids_and_close_releases_resources():
         second.close()
 
     assert _xolky.active_solver_count() == 0
-    with pytest.raises(ValueError, match="unknown or closed"):
-        first.close()
+    first.close()
+
+
+def test_context_manager_cleanup_is_idempotent():
+    indices, indptr, _, _ = device_problem()
+
+    with xolky.setup(indices, indptr) as solver:
+        solver.close()
+
+    assert _xolky.active_solver_count() == 0
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,43 @@ three operations:
 
 ## Installation
 
-Install CUDA 13 and cuDSS first, then install Xolky:
+Install CUDA 13 and cuDSS first.
+
+By default, the build searches `CUDA_HOME`, `/usr/local/cuda`, and standard
+system development directories. A common cuDSS installation layout is:
+
+~~~text
+/usr/local/cuda/include/cudss.h
+/usr/local/cuda/lib64/libcudss.so
+~~~
+
+At runtime, `libcudss.so` and its dependencies must also be visible to the
+dynamic loader. If necessary, register its library directory with the system
+linker configuration, or set, for example:
+
+~~~bash
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+~~~
+
+Verify that the runtime loader can find cuDSS before installing:
+
+~~~bash
+python -c 'import ctypes; ctypes.CDLL("libcudss.so"); print("cuDSS is visible")'
+~~~
+
+If cuDSS is installed elsewhere, set `CUDSS_ROOT` to its installation prefix.
+Set `CUDA_HOME` similarly when CUDA itself is not under `/usr/local/cuda`:
+
+~~~bash
+export CUDA_HOME=/path/to/cuda
+export CUDSS_ROOT=/path/to/cudss
+export LD_LIBRARY_PATH=$CUDSS_ROOT/lib64:$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+~~~
+
+The build checks for `cudss.h` and the linkable `libcudss.so` and reports their
+searched paths if either is missing.
+
+Once those build-time and runtime paths are configured, install Xolky:
 
 ~~~bash
 pip install git+ssh://git@github.com/pedrozudo/xolky.git
@@ -71,7 +107,8 @@ construct a cuDSS batched solver. Native batching requires its own solver
 resource and buffer layout and will be implemented separately.
 
 Use close, or the solver as a context manager, to release its CUDA and cuDSS
-resources. Remaining resources are released at interpreter shutdown.
+resources. `close()` is idempotent. Remaining resources are released at
+interpreter shutdown.
 
 ## Native resource model
 
@@ -85,6 +122,20 @@ Persistent cuDSS descriptors only reference solver-owned buffers. Runtime calls
 copy values or vectors into those buffers, execute on the dedicated stream, and
 copy solutions back to JAX outputs. The descriptors and handle stream are never
 retargeted after setup.
+
+## Benchmarking
+
+Use the repeated-solve benchmark to measure the tight coarse-solver path:
+
+~~~bash
+python benchmarks/benchmark_repeated_solve.py --size 4096 --iterations 1000
+~~~
+
+The FFI handlers intentionally do not advertise XLA command-buffer
+compatibility. Their fixed solver-owned device buffers and private CUDA stream
+do not satisfy that trait's execution contract. Reconsider the trait only if
+the native execution model changes and CUDA graph capture is validated
+independently.
 
 ## Supported
 
