@@ -195,6 +195,38 @@ def test_failed_solver_rejects_future_native_operations():
         replacement.close()
 
 
+def test_failure_after_slot_acquisition_poisons_slot_and_solver():
+    indices, indptr, values, _ = device_problem()
+    solver = xolky.setup(indices, indptr)
+    solver_id = int(np.asarray(solver.solver_id))
+    try:
+        solver = xolky.refactor(solver, values)
+        solver.sequence.block_until_ready()
+        _xolky._fail_next_solve_after_acquisition_for_testing(solver_id)
+
+        with pytest.raises(
+            jax.errors.JaxRuntimeError,
+            match="injected failure after solve-slot acquisition",
+        ):
+            _, result = xolky.solve(solver, jnp.ones(solver.n))
+            result.block_until_ready()
+
+        solver_failed, failed_slots = (
+            _xolky._solver_failure_state_for_testing(solver_id)
+        )
+        assert solver_failed
+        assert failed_slots == 1
+    finally:
+        solver.close()
+
+    replacement = xolky.setup(indices, indptr)
+    try:
+        replacement = xolky.refactor(replacement, values)
+        replacement.sequence.block_until_ready()
+    finally:
+        replacement.close()
+
+
 def test_same_solver_concurrent_solves_are_serialized_safely():
     indices, indptr, values, _ = device_problem()
     rhs_1 = jnp.asarray([1.0, 2.0, 3.0, 4.0])
@@ -276,3 +308,82 @@ def test_independent_solvers_can_execute_concurrently():
         first.close()
         second.close()
 
+
+def test_solve_slot_pool_reuses_completed_descriptors_in_compiled_loop():
+    indices, indptr, values, _ = device_problem()
+    right_hand_sides = (
+        jnp.arange(64 * 4, dtype=jnp.float64).reshape(64, 4) / 17.0 + 1.0
+    )
+
+    @jax.jit
+    def solve_many(solver, rhs_values):
+        def body(index, state):
+            current_solver, checksum = state
+            current_solver, solution = xolky.solve(
+                current_solver, rhs_values[index]
+            )
+            return current_solver, checksum + solution
+
+        return jax.lax.fori_loop(
+            0,
+            rhs_values.shape[0],
+            body,
+            (solver, jnp.zeros(solver.n, dtype=rhs_values.dtype)),
+        )
+
+    solver = xolky.setup(indices, indptr)
+    solver_id = int(np.asarray(solver.solver_id))
+    try:
+        solver = xolky.refactor(solver, values)
+        solver.sequence.block_until_ready()
+
+        solver, first_checksum = solve_many(solver, right_hand_sides)
+        first_checksum.block_until_ready()
+        first_slot_count = _xolky._solve_slot_count_for_testing(solver_id)
+
+        solver, second_checksum = solve_many(solver, right_hand_sides)
+        second_checksum.block_until_ready()
+        second_slot_count = _xolky._solve_slot_count_for_testing(solver_id)
+
+        solver, final_solution = xolky.solve(solver, right_hand_sides[0])
+        final_solution.block_until_ready()
+        final_slot_count = _xolky._solve_slot_count_for_testing(solver_id)
+
+        expected = np.sum(
+            [
+                np.linalg.solve(dense(VALUES_1), rhs)
+                for rhs in np.asarray(right_hand_sides)
+            ],
+            axis=0,
+        )
+        assert first_slot_count >= 1
+        assert first_slot_count <= right_hand_sides.shape[0]
+        assert second_slot_count <= right_hand_sides.shape[0]
+        assert final_slot_count == second_slot_count
+        np.testing.assert_allclose(first_checksum, expected)
+        np.testing.assert_allclose(second_checksum, expected)
+        np.testing.assert_allclose(
+            final_solution,
+            np.linalg.solve(dense(VALUES_1), np.asarray(right_hand_sides[0])),
+        )
+    finally:
+        solver.close()
+
+
+def test_close_waits_for_an_asynchronous_direct_buffer_solve():
+    indices, indptr, values, _ = device_problem()
+    rhs = jnp.asarray([3.0, -1.0, 2.0, 4.0], dtype=jnp.float64)
+
+    @jax.jit
+    def solve_once(solver, right_hand_side):
+        return xolky.solve(solver, right_hand_side)
+
+    solver = xolky.setup(indices, indptr)
+    solver = xolky.refactor(solver, values)
+    solver.sequence.block_until_ready()
+
+    solver, actual = solve_once(solver, rhs)
+    solver.close()
+
+    expected = np.linalg.solve(dense(VALUES_1), np.asarray(rhs))
+    np.testing.assert_allclose(actual, expected)

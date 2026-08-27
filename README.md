@@ -114,14 +114,23 @@ interpreter shutdown.
 
 Each solver owns:
 
-- a cuDSS handle, configuration, data object, and matrix descriptors;
+- a cuDSS handle, configuration, data object, and CSR matrix descriptor;
 - a dedicated non-blocking CUDA stream and synchronization events;
-- fixed device buffers for CSR structure, values, right-hand side, and result.
+- fixed device buffers for the CSR structure and numeric values;
+- a dynamically grown pool of dense descriptor pairs and per-solve events.
 
-Persistent cuDSS descriptors only reference solver-owned buffers. Runtime calls
-copy values or vectors into those buffers, execute on the dedicated stream, and
-copy solutions back to JAX outputs. The descriptors and handle stream are never
-retargeted after setup.
+The persistent CSR descriptor references only solver-owned buffers. Refactor
+copies numeric CSR values once per matrix update. Solve slots instead wrap the
+FFI's JAX-owned FP64 right-hand-side and output buffers directly, eliminating
+both device-to-device copies from the repeated-solve path. A slot is rebound
+only after its CUDA completion event has fired, so asynchronous solves never
+retarget a descriptor that is still in flight.
+
+The pool grows to the maximum number of solve submissions observed in flight
+and reuses completed slots without host synchronization. Solver teardown first
+synchronizes the private stream, then destroys every pooled descriptor and
+event. Float32 inputs still require the documented JAX float32-to-float64 and
+float64-to-float32 conversions around the native solve.
 
 ## Benchmarking
 

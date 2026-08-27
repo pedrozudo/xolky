@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace py = pybind11;
 namespace ffi = xla::ffi;
@@ -71,6 +72,57 @@ private:
   bool restore_ = false;
 };
 
+struct SolveSlot {
+  explicit SolveSlot(int64_t n_value) : n(n_value) {}
+
+  SolveSlot(const SolveSlot &) = delete;
+  SolveSlot &operator=(const SolveSlot &) = delete;
+
+  void Initialize(double *rhs_values, double *solution_values) {
+    CheckCuda(cudaEventCreateWithFlags(&input_ready, cudaEventDisableTiming),
+              "cudaEventCreateWithFlags(solve_slot.input_ready)");
+    CheckCuda(cudaEventCreateWithFlags(&completed, cudaEventDisableTiming),
+              "cudaEventCreateWithFlags(solve_slot.completed)");
+    CheckCudss(cudssMatrixCreateDn(&rhs_matrix, n, 1, n, rhs_values,
+                                   CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
+               "cudssMatrixCreateDn(solve_slot.rhs)");
+    CheckCudss(cudssMatrixCreateDn(&solution_matrix, n, 1, n,
+                                   solution_values, CUDA_R_64F,
+                                   CUDSS_LAYOUT_COL_MAJOR),
+               "cudssMatrixCreateDn(solve_slot.solution)");
+  }
+
+  void Bind(double *rhs_values, double *solution_values) {
+    CheckCudss(cudssMatrixSetValues(rhs_matrix, rhs_values),
+               "cudssMatrixSetValues(solve_slot.rhs)");
+    CheckCudss(cudssMatrixSetValues(solution_matrix, solution_values),
+               "cudssMatrixSetValues(solve_slot.solution)");
+  }
+
+  ~SolveSlot() noexcept {
+    if (rhs_matrix != nullptr) {
+      cudssMatrixDestroy(rhs_matrix);
+    }
+    if (solution_matrix != nullptr) {
+      cudssMatrixDestroy(solution_matrix);
+    }
+    if (input_ready != nullptr) {
+      cudaEventDestroy(input_ready);
+    }
+    if (completed != nullptr) {
+      cudaEventDestroy(completed);
+    }
+  }
+
+  int64_t n;
+  cudssMatrix_t rhs_matrix{};
+  cudssMatrix_t solution_matrix{};
+  cudaEvent_t input_ready = nullptr;
+  cudaEvent_t completed = nullptr;
+  bool in_flight = false;
+  bool failed = false;
+};
+
 struct SolverEntry {
   SolverEntry(int64_t n_value, int64_t nnz_value, int device_value)
       : n(n_value), nnz(nnz_value), device_ordinal(device_value) {}
@@ -97,12 +149,6 @@ struct SolverEntry {
     CheckCuda(cudaMalloc(reinterpret_cast<void **>(&csr_values),
                          static_cast<size_t>(nnz) * sizeof(double)),
               "cudaMalloc(csr_values)");
-    CheckCuda(cudaMalloc(reinterpret_cast<void **>(&rhs),
-                         static_cast<size_t>(n) * sizeof(double)),
-              "cudaMalloc(rhs)");
-    CheckCuda(cudaMalloc(reinterpret_cast<void **>(&solution),
-                         static_cast<size_t>(n) * sizeof(double)),
-              "cudaMalloc(solution)");
 
     CheckCudss(cudssCreate(&handle), "cudssCreate");
     CheckCudss(cudssConfigCreate(&config), "cudssConfigCreate");
@@ -115,12 +161,47 @@ struct SolverEntry {
                              CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER,
                              CUDSS_BASE_ZERO),
         "cudssMatrixCreateCsr");
-    CheckCudss(cudssMatrixCreateDn(&solution_matrix, n, 1, n, solution,
-                                   CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
-               "cudssMatrixCreateDn(solution)");
-    CheckCudss(cudssMatrixCreateDn(&rhs_matrix, n, 1, n, rhs, CUDA_R_64F,
-                                   CUDSS_LAYOUT_COL_MAJOR),
-               "cudssMatrixCreateDn(rhs)");
+  }
+
+  SolveSlot &AcquireSolveSlot(double *rhs_values, double *solution_values) {
+    for (auto &slot : solve_slots) {
+      if (slot->failed) {
+        continue;
+      }
+      if (slot->in_flight) {
+        cudaError_t status = cudaEventQuery(slot->completed);
+        if (status == cudaErrorNotReady) {
+          continue;
+        }
+        if (status != cudaSuccess) {
+          failed = true;
+          throw std::runtime_error(
+              CudaErrorMessage(status, "cudaEventQuery(solve_slot.completed)"));
+        }
+        slot->in_flight = false;
+      }
+
+      try {
+        slot->Bind(rhs_values, solution_values);
+      } catch (...) {
+        slot->failed = true;
+        failed = true;
+        throw;
+      }
+      return *slot;
+    }
+
+    auto slot = std::make_unique<SolveSlot>(n);
+    try {
+      slot->Initialize(rhs_values, solution_values);
+    } catch (...) {
+      slot->failed = true;
+      failed = true;
+      throw;
+    }
+    SolveSlot *result = slot.get();
+    solve_slots.push_back(std::move(slot));
+    return *result;
   }
 
   ~SolverEntry() noexcept {
@@ -136,12 +217,7 @@ struct SolverEntry {
       cudaStreamSynchronize(stream);
     }
 
-    if (rhs_matrix != nullptr) {
-      cudssMatrixDestroy(rhs_matrix);
-    }
-    if (solution_matrix != nullptr) {
-      cudssMatrixDestroy(solution_matrix);
-    }
+    solve_slots.clear();
     if (matrix != nullptr) {
       cudssMatrixDestroy(matrix);
     }
@@ -163,12 +239,6 @@ struct SolverEntry {
     }
     if (csr_values != nullptr) {
       cudaFree(csr_values);
-    }
-    if (rhs != nullptr) {
-      cudaFree(rhs);
-    }
-    if (solution != nullptr) {
-      cudaFree(solution);
     }
     if (input_ready != nullptr) {
       cudaEventDestroy(input_ready);
@@ -192,14 +262,12 @@ struct SolverEntry {
   cudssConfig_t config{};
   cudssData_t data{};
   cudssMatrix_t matrix{};
-  cudssMatrix_t solution_matrix{};
-  cudssMatrix_t rhs_matrix{};
 
   int32_t *csr_indices = nullptr;
   int32_t *csr_indptr = nullptr;
   double *csr_values = nullptr;
-  double *rhs = nullptr;
-  double *solution = nullptr;
+
+  std::vector<std::unique_ptr<SolveSlot>> solve_slots;
 
   cudaStream_t stream = nullptr;
   cudaEvent_t input_ready = nullptr;
@@ -208,6 +276,7 @@ struct SolverEntry {
   bool initialized = false;
   bool factorized = false;
   bool failed = false;
+  bool fail_next_solve_after_acquisition_for_testing = false;
   std::mutex mutex;
 };
 
@@ -312,23 +381,31 @@ void ValidateDevice(const SolverEntry &entry, int32_t device_ordinal) {
   }
 }
 
-void BeginOperation(SolverEntry &entry, cudaStream_t caller_stream) {
-  CheckCuda(cudaEventRecord(entry.input_ready, caller_stream),
+void BeginOperation(SolverEntry &entry, cudaStream_t caller_stream,
+                    cudaEvent_t input_ready) {
+  CheckCuda(cudaEventRecord(input_ready, caller_stream),
             "cudaEventRecord(input_ready)");
-  CheckCuda(cudaStreamWaitEvent(entry.stream, entry.input_ready, 0),
+  CheckCuda(cudaStreamWaitEvent(entry.stream, input_ready, 0),
             "cudaStreamWaitEvent(input_ready)");
 }
 
-void EndOperation(SolverEntry &entry, cudaStream_t caller_stream) {
-  CheckCuda(cudaEventRecord(entry.output_ready, entry.stream),
+void EndOperation(SolverEntry &entry, cudaStream_t caller_stream,
+                  cudaEvent_t output_ready) {
+  CheckCuda(cudaEventRecord(output_ready, entry.stream),
             "cudaEventRecord(output_ready)");
-  CheckCuda(cudaStreamWaitEvent(caller_stream, entry.output_ready, 0),
+  CheckCuda(cudaStreamWaitEvent(caller_stream, output_ready, 0),
             "cudaStreamWaitEvent(output_ready)");
 }
 
 class OperationGuard {
 public:
-  explicit OperationGuard(SolverEntry &entry) : entry_(entry) {}
+  explicit OperationGuard(SolverEntry &entry)
+      : OperationGuard(entry, entry.input_ready, entry.output_ready) {}
+
+  OperationGuard(SolverEntry &entry, cudaEvent_t input_ready,
+                 cudaEvent_t output_ready, bool *resource_failed = nullptr)
+      : entry_(entry), input_ready_(input_ready), output_ready_(output_ready),
+        resource_failed_(resource_failed) {}
 
   OperationGuard(const OperationGuard &) = delete;
   OperationGuard &operator=(const OperationGuard &) = delete;
@@ -336,21 +413,27 @@ public:
   ~OperationGuard() {
     if (started_ && !completed_) {
       entry_.failed = true;
+      if (resource_failed_ != nullptr) {
+        *resource_failed_ = true;
+      }
     }
   }
 
   void Begin(cudaStream_t caller_stream) {
     started_ = true;
-    BeginOperation(entry_, caller_stream);
+    BeginOperation(entry_, caller_stream, input_ready_);
   }
 
   void Complete(cudaStream_t caller_stream) {
-    EndOperation(entry_, caller_stream);
+    EndOperation(entry_, caller_stream, output_ready_);
     completed_ = true;
   }
 
 private:
   SolverEntry &entry_;
+  cudaEvent_t input_ready_;
+  cudaEvent_t output_ready_;
+  bool *resource_failed_;
   bool started_ = false;
   bool completed_ = false;
 };
@@ -520,20 +603,23 @@ ffi::Error SolveImpl(
                         "solver has not been factorized");
     }
 
-    OperationGuard operation(*entry);
+    SolveSlot &slot = entry->AcquireSolveSlot(
+        right_hand_side.typed_data(), result->typed_data());
+    slot.in_flight = true;
+
+    OperationGuard operation(*entry, slot.input_ready, slot.completed,
+                             &slot.failed);
     operation.Begin(caller_stream);
-    CheckCuda(cudaMemcpyAsync(entry->rhs, right_hand_side.typed_data(),
-                              static_cast<size_t>(entry->n) * sizeof(double),
-                              cudaMemcpyDeviceToDevice, entry->stream),
-              "cudaMemcpyAsync(rhs)");
+    if (entry->fail_next_solve_after_acquisition_for_testing) {
+      entry->fail_next_solve_after_acquisition_for_testing = false;
+      throw std::runtime_error(
+          "injected failure after solve-slot acquisition");
+    }
+
     CheckCudss(cudssExecute(entry->handle, CUDSS_PHASE_SOLVE, entry->config,
-                            entry->data, entry->matrix,
-                            entry->solution_matrix, entry->rhs_matrix),
+                            entry->data, entry->matrix, slot.solution_matrix,
+                            slot.rhs_matrix),
                "cudssExecute(CUDSS_PHASE_SOLVE)");
-    CheckCuda(cudaMemcpyAsync(result->typed_data(), entry->solution,
-                              static_cast<size_t>(entry->n) * sizeof(double),
-                              cudaMemcpyDeviceToDevice, entry->stream),
-              "cudaMemcpyAsync(solution)");
     operation.Complete(caller_stream);
 
     return ffi::Error::Success();
@@ -570,6 +656,27 @@ PYBIND11_MODULE(_xolky, module) {
   module.def("destroy_solver", [](SolverId id) { Registry().Destroy(id); });
   module.def("shutdown", []() { Registry().Clear(); });
   module.def("active_solver_count", []() { return Registry().Size(); });
+  module.def("_solve_slot_count_for_testing", [](SolverId id) {
+    auto entry = Registry().Get(id);
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    return entry->solve_slots.size();
+  });
+  module.def("_solver_failure_state_for_testing", [](SolverId id) {
+    auto entry = Registry().Get(id);
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    size_t failed_slots = 0;
+    for (const auto &slot : entry->solve_slots) {
+      if (slot->failed) {
+        ++failed_slots;
+      }
+    }
+    return py::make_tuple(entry->failed, failed_slots);
+  });
+  module.def("_fail_next_solve_after_acquisition_for_testing", [](SolverId id) {
+    auto entry = Registry().Get(id);
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    entry->fail_next_solve_after_acquisition_for_testing = true;
+  });
   module.def("_poison_solver_for_testing", [](SolverId id) {
     auto entry = Registry().Get(id);
     std::lock_guard<std::mutex> lock(entry->mutex);

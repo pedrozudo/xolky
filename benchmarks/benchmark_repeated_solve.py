@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 import xolky
+from xolky import _xolky
 
 
 def tridiagonal_problem(
@@ -41,7 +42,7 @@ def benchmark(
     iterations: int,
     warmups: int,
     repetitions: int,
-) -> tuple[list[float], float]:
+) -> tuple[list[float], float, int]:
     indices, indptr, values, rhs = tridiagonal_problem(size)
 
     @jax.jit
@@ -62,7 +63,9 @@ def benchmark(
 
     timings = []
     checksum_value = 0.0
+    slot_count = 0
     with xolky.setup(indices, indptr) as solver:
+        solver_id = int(np.asarray(solver.solver_id))
         solver = xolky.refactor(solver, values)
         solver.sequence.block_until_ready()
 
@@ -76,8 +79,9 @@ def benchmark(
             checksum.block_until_ready()
             timings.append(time.perf_counter() - start)
             checksum_value = float(checksum)
+        slot_count = _xolky._solve_slot_count_for_testing(solver_id)
 
-    return timings, checksum_value
+    return timings, checksum_value, slot_count
 
 
 def main() -> None:
@@ -91,7 +95,7 @@ def main() -> None:
     arguments = parser.parse_args()
 
     jax.config.update("jax_enable_x64", True)
-    timings, checksum = benchmark(
+    timings, checksum, slot_count = benchmark(
         arguments.size,
         arguments.iterations,
         arguments.warmups,
@@ -104,6 +108,7 @@ def main() -> None:
     print(f"median repetition: {median * 1e3:.3f} ms")
     print(f"median solve: {median / arguments.iterations * 1e6:.3f} us")
     print(f"range: {min(timings) * 1e3:.3f}-{max(timings) * 1e3:.3f} ms")
+    print(f"solve-slot high-water mark: {slot_count}")
     print(f"checksum: {checksum:.12g}")
 
 
