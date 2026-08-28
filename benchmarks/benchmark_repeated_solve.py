@@ -64,22 +64,23 @@ def benchmark(
     timings = []
     checksum_value = 0.0
     slot_count = 0
-    with xolky.setup(indices, indptr) as solver:
-        solver_id = int(np.asarray(solver.solver_id))
-        solver = xolky.refactor(solver, values)
-        solver.sequence.block_until_ready()
+    solver = xolky.setup(indices, indptr)
+    solver_id = int(np.asarray(solver.solver_id))
+    solver = xolky.refactor(solver, values)
+    solver.sequence.block_until_ready()
 
-        for _ in range(warmups):
-            solver, checksum = solve_loop(solver, rhs)
-            checksum.block_until_ready()
+    for _ in range(warmups):
+        solver, checksum = solve_loop(solver, rhs)
+        checksum.block_until_ready()
 
-        for _ in range(repetitions):
-            start = time.perf_counter()
-            solver, checksum = solve_loop(solver, rhs)
-            checksum.block_until_ready()
-            timings.append(time.perf_counter() - start)
-            checksum_value = float(checksum)
-        slot_count = _xolky._solve_slot_count_for_testing(solver_id)
+    for _ in range(repetitions):
+        start = time.perf_counter()
+        solver, checksum = solve_loop(solver, rhs)
+        checksum.block_until_ready()
+        timings.append(time.perf_counter() - start)
+        checksum_value = float(checksum)
+    slot_count = _xolky._solve_slot_count_for_testing(solver_id)
+    solver.close()
 
     return timings, checksum_value, slot_count
 

@@ -59,10 +59,11 @@ pip install -e ".[test]"
 pytest
 ~~~
 
-## Functional API
+## Linear functional API
 
 The CSR input represents the lower triangle of a square SPD matrix. Indices and
-indptr must use int32.
+indptr must use int32. Numeric matrix values and right-hand sides must use
+float64; Xolky performs no implicit dtype conversions.
 
 ~~~python
 import jax
@@ -73,14 +74,36 @@ jax.config.update("jax_enable_x64", True)
 
 indices = jnp.array([0, 0, 1, 2], dtype=jnp.int32)
 indptr = jnp.array([0, 1, 3, 4], dtype=jnp.int32)
-values = jnp.array([4.0, 1.0, 3.0, 2.0])
-rhs = jnp.array([1.0, 2.0, 3.0])
+values = jnp.array([4.0, 1.0, 3.0, 2.0], dtype=jnp.float64)
+rhs = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float64)
 
 solver = xolky.setup(indices, indptr)
 solver = xolky.refactor(solver, values)
 solver, solution = xolky.solve(solver, rhs)
 solver.close()
 ~~~
+
+FP32 source data must be converted explicitly. The local x64 context permits
+the conversion without changing JAX's process-wide configuration:
+
+~~~python
+values_fp32 = jnp.array([4.0, 1.0, 3.0, 2.0], dtype=jnp.float32)
+rhs_fp32 = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)
+
+solver = xolky.setup(indices, indptr)
+
+with jax.enable_x64():
+    values = values_fp32.astype(jnp.float64)
+    rhs = rhs_fp32.astype(jnp.float64)
+
+    solver = xolky.refactor(solver, values)
+    solver, solution = xolky.solve(solver, rhs)
+
+solver.close()
+~~~
+
+The complete runnable version is in
+[`examples/fp32_source.py`](examples/fp32_source.py).
 
 Setup is a host-side resource operation and must run outside jax.jit.
 Refactor and solve accept and return the solver PyTree:
@@ -106,9 +129,9 @@ would only repeat operations against one mutable native solver; it would not
 construct a cuDSS batched solver. Native batching requires its own solver
 resource and buffer layout and will be implemented separately.
 
-Use close, or the solver as a context manager, to release its CUDA and cuDSS
-resources. `close()` is idempotent. Remaining resources are released at
-interpreter shutdown.
+Call `close()` on the latest solver state to release its CUDA and cuDSS
+resources. It waits for operations ordered before that state to finish and is
+idempotent. Remaining resources are released at interpreter shutdown.
 
 ## Native resource model
 
@@ -129,8 +152,8 @@ retarget a descriptor that is still in flight.
 The pool grows to the maximum number of solve submissions observed in flight
 and reuses completed slots without host synchronization. Solver teardown first
 synchronizes the private stream, then destroys every pooled descriptor and
-event. Float32 inputs still require the documented JAX float32-to-float64 and
-float64-to-float32 conversions around the native solve.
+event. Because the public API is float64-only, the repeated-solve path performs
+no hidden dtype conversions.
 
 ## Benchmarking
 
@@ -152,7 +175,7 @@ independently.
 - JAX 0.11.1 or newer
 - CUDA 13 and cuDSS
 - int32 CSR structure
-- float32 and float64 inputs; cuDSS computation uses float64 internally
+- float64 numeric values and right-hand sides
 - one right-hand side
 - jax.jit and JAX control-flow loops
 

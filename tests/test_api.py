@@ -12,6 +12,8 @@ from ._problems import device_problem
 def test_public_api_is_functional():
     assert xolky.__all__ == ["SparseCholesky", "setup", "refactor", "solve"]
     assert not hasattr(_xolky, "CuDssSparseCholesky")
+    assert not hasattr(xolky.SparseCholesky, "__enter__")
+    assert not hasattr(xolky.SparseCholesky, "__exit__")
 
 
 def test_solver_is_a_pytree_with_dynamic_runtime_state():
@@ -48,15 +50,6 @@ def test_setup_allocates_unique_ids_and_close_releases_resources():
 
     assert _xolky.active_solver_count() == 0
     first.close()
-
-
-def test_context_manager_cleanup_is_idempotent():
-    indices, indptr, _, _ = device_problem()
-
-    with xolky.setup(indices, indptr) as solver:
-        solver.close()
-
-    assert _xolky.active_solver_count() == 0
 
 
 @pytest.mark.parametrize(
@@ -104,11 +97,33 @@ def test_runtime_argument_validation():
     try:
         with pytest.raises(ValueError, match="csr_values"):
             xolky.refactor(solver, values[:-1])
-        with pytest.raises(TypeError, match="floating-point"):
-            xolky.refactor(solver, jnp.ones(solver.nnz, dtype=jnp.int32))
         with pytest.raises(ValueError, match="right_hand_side"):
             xolky.solve(solver, jnp.ones(solver.n + 1))
-        with pytest.raises(TypeError, match="floating-point"):
-            xolky.solve(solver, jnp.ones(solver.n, dtype=jnp.int32))
+    finally:
+        solver.close()
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        jnp.int32,
+        jnp.float16,
+        jnp.bfloat16,
+        jnp.float32,
+        jnp.complex64,
+        jnp.complex128,
+    ],
+)
+def test_runtime_numeric_arguments_require_float64(dtype):
+    indices, indptr, _, _ = device_problem()
+    solver = xolky.setup(indices, indptr)
+    try:
+        with pytest.raises(TypeError, match="csr_values must have dtype float64"):
+            xolky.refactor(solver, jnp.ones(solver.nnz, dtype=dtype))
+        with pytest.raises(
+            TypeError,
+            match="right_hand_side must have dtype float64",
+        ):
+            xolky.solve(solver, jnp.ones(solver.n, dtype=dtype))
     finally:
         solver.close()

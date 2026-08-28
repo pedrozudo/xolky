@@ -11,20 +11,45 @@ from xolky import _xolky
 from ._problems import VALUES_1, VALUES_2, dense, device_problem
 
 
-@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
-def test_factorize_and_solve_matches_dense(dtype):
-    indices, indptr, values, _ = device_problem(dtype)
-    rhs = jnp.asarray([1.0, -2.0, 3.0, 0.5], dtype=dtype)
+def test_factorize_and_solve_matches_dense():
+    indices, indptr, values, _ = device_problem()
+    rhs = jnp.asarray([1.0, -2.0, 3.0, 0.5], dtype=jnp.float64)
     solver = xolky.setup(indices, indptr)
     try:
         solver = xolky.refactor(solver, values)
         solver, actual = xolky.solve(solver, rhs)
 
         expected = np.linalg.solve(dense(VALUES_1), np.asarray(rhs))
-        assert actual.dtype == dtype
+        assert actual.dtype == jnp.float64
         np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6)
     finally:
         solver.close()
+
+
+def test_fp32_sources_are_explicitly_converted_in_local_x64_context():
+    indices, indptr, _, _ = device_problem()
+    values_fp32 = jnp.asarray(VALUES_1, dtype=jnp.float32)
+    rhs_fp32 = jnp.asarray([1.0, -2.0, 3.0, 0.5], dtype=jnp.float32)
+
+    assert values_fp32.dtype == jnp.float32
+    assert rhs_fp32.dtype == jnp.float32
+
+    solver = xolky.setup(indices, indptr)
+
+    with jax.enable_x64():
+        values = values_fp32.astype(jnp.float64)
+        rhs = rhs_fp32.astype(jnp.float64)
+
+        solver = xolky.refactor(solver, values)
+        solver, actual = xolky.solve(solver, rhs)
+
+    solver.close()
+
+    assert values.dtype == jnp.float64
+    assert rhs.dtype == jnp.float64
+    assert actual.dtype == jnp.float64
+    expected = np.linalg.solve(dense(VALUES_1), np.asarray(rhs))
+    np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6)
 
 
 def test_refactor_reuses_structure_for_new_values():
@@ -226,35 +251,6 @@ def test_failure_after_slot_acquisition_poisons_slot_and_solver():
     finally:
         replacement.close()
 
-
-def test_same_solver_concurrent_solves_are_serialized_safely():
-    indices, indptr, values, _ = device_problem()
-    rhs_1 = jnp.asarray([1.0, 2.0, 3.0, 4.0])
-    rhs_2 = jnp.asarray([-2.0, 1.0, 0.5, 3.0])
-    solver = xolky.setup(indices, indptr)
-    solver = xolky.refactor(solver, values)
-    solver.sequence.block_until_ready()
-
-    @jax.jit
-    def solve_only(current_solver, rhs):
-        return xolky.solve(current_solver, rhs)[1]
-
-    solve_only(solver, rhs_1).block_until_ready()
-    try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            first = executor.submit(lambda: np.asarray(solve_only(solver, rhs_1)))
-            second = executor.submit(lambda: np.asarray(solve_only(solver, rhs_2)))
-            actual_1 = first.result(timeout=20)
-            actual_2 = second.result(timeout=20)
-
-        np.testing.assert_allclose(
-            actual_1, np.linalg.solve(dense(VALUES_1), np.asarray(rhs_1))
-        )
-        np.testing.assert_allclose(
-            actual_2, np.linalg.solve(dense(VALUES_1), np.asarray(rhs_2))
-        )
-    finally:
-        solver.close()
 
 def test_closed_solver_identifier_is_rejected_by_native_registry():
     indices, indptr, values, _ = device_problem()

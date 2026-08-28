@@ -4,6 +4,9 @@ import jax.experimental.sparse as jsparse
 import xolky
 
 
+jax.config.update("jax_enable_x64", True)
+
+
 def solve(p):
     A = jsparse.COO((p[0], p[1], p[2]), shape=(p[4], p[4]))._sort_indices().todense()
 

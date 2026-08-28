@@ -8,6 +8,9 @@ import jax.experimental.sparse as jsparse
 import xolky
 
 
+jax.config.update("jax_enable_x64", True)
+
+
 @contextmanager
 def time_block(label="Block"):
     start = time.perf_counter()

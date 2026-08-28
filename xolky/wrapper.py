@@ -49,14 +49,9 @@ class SparseCholesky:
     device_ordinal: int = field(metadata={"static": True})
 
     def close(self) -> None:
-        """Release native resources; repeated calls are harmless."""
+        """Wait for pending operations and release the native resources."""
+        jax.block_until_ready(self.sequence)
         _xolky.destroy_solver(_concrete_solver_id(self))
-
-    def __enter__(self) -> SparseCholesky:
-        return self
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        self.close()
 
 
 def _concrete_solver_id(solver: SparseCholesky) -> int:
@@ -241,14 +236,14 @@ def refactor(solver: SparseCholesky, csr_values: Any) -> SparseCholesky:
     values = jnp.asarray(csr_values)
     if values.ndim != 1 or values.shape[0] != solver.nnz:
         raise ValueError(f"csr_values must have shape ({solver.nnz},)")
-    if not jnp.issubdtype(values.dtype, jnp.inexact):
-        raise TypeError("csr_values must have a floating-point dtype")
+    if values.dtype != jnp.float64:
+        raise TypeError("csr_values must have dtype float64")
 
     with jax.enable_x64():
         sequence = _refactor_ffi(
             solver.solver_id,
             solver.sequence,
-            values.astype(jnp.float64),
+            values,
         )
     return dataclasses.replace(solver, sequence=sequence)
 
@@ -263,13 +258,13 @@ def solve(
     rhs = jnp.asarray(right_hand_side)
     if rhs.ndim != 1 or rhs.shape[0] != solver.n:
         raise ValueError(f"right_hand_side must have shape ({solver.n},)")
-    if not jnp.issubdtype(rhs.dtype, jnp.inexact):
-        raise TypeError("right_hand_side must have a floating-point dtype")
+    if rhs.dtype != jnp.float64:
+        raise TypeError("right_hand_side must have dtype float64")
 
     with jax.enable_x64():
         sequence, result = _solve_ffi(solver.n)(
             solver.solver_id,
             solver.sequence,
-            rhs.astype(jnp.float64),
+            rhs,
         )
-    return dataclasses.replace(solver, sequence=sequence), result.astype(rhs.dtype)
+    return dataclasses.replace(solver, sequence=sequence), result
