@@ -649,7 +649,7 @@ template <typename T> py::capsule EncapsulateFfiCall(T *function) {
 
 } // namespace
 
-PYBIND11_MODULE(_xolky, module) {
+PYBIND11_MODULE(_xolky_cuda, module) {
   module.def("create_solver", [](int64_t n, int64_t nnz, int device_ordinal) {
     return Registry().Create(n, nnz, device_ordinal);
   });

@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 import xolky
-from xolky import _xolky
+from xolky.wrapper import _xolky_cuda
 
 
 def tridiagonal_problem(
@@ -79,7 +79,7 @@ def benchmark(
         checksum.block_until_ready()
         timings.append(time.perf_counter() - start)
         checksum_value = float(checksum)
-    slot_count = _xolky._solve_slot_count_for_testing(solver_id)
+    slot_count = _xolky_cuda._solve_slot_count_for_testing(solver_id)
     solver.close()
 
     return timings, checksum_value, slot_count

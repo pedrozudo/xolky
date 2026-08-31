@@ -24,3 +24,28 @@ def test_build_reports_missing_cudss_development_files(tmp_path):
     assert os.fspath(tmp_path / "include" / "cudss.h") in output
     assert os.fspath(tmp_path / "lib64" / "libcudss.so") in output
     assert "set CUDSS_ROOT to its installation prefix" in output
+
+
+def test_build_reports_missing_cholmod_development_files(tmp_path):
+    project_root = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment["CHOLMOD_ROOT"] = os.fspath(tmp_path)
+    environment["XOLKY_BUILD_CUDA"] = "off"
+
+    result = subprocess.run(
+        [sys.executable, "setup.py", "build_ext"],
+        cwd=project_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "CHOLMOD development files were not found" in output
+    assert os.fspath(
+        tmp_path / "include" / "suitesparse" / "cholmod.h"
+    ) in output
+    assert os.fspath(tmp_path / "lib64" / "libcholmod.so") in output
+    assert "set CHOLMOD_ROOT to their installation prefix" in output

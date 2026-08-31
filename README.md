@@ -1,8 +1,9 @@
 # xolky (/ˈʃɔl.ki/)
 
-Xolky solves sparse symmetric positive-definite linear systems with NVIDIA
-cuDSS from JAX-compiled CUDA functions. It separates the solver lifecycle into
-three operations:
+Xolky solves sparse symmetric positive-definite linear systems from
+JAX-compiled functions. CPU arrays use a system-installed SuiteSparse CHOLMOD;
+NVIDIA CUDA arrays use cuDSS. Xolky separates the solver lifecycle into three
+operations:
 
 1. setup the fixed CSR sparsity structure once;
 2. refactor the numeric values whenever the matrix changes;
@@ -10,7 +11,30 @@ three operations:
 
 ## Installation
 
-Install CUDA 13 and cuDSS first.
+Xolky builds each backend only when its development files are available. The
+CHOLMOD library is never bundled: the resulting adapter dynamically links to
+the user's system installation.
+
+For the CPU backend, install SuiteSparse/CHOLMOD development files first. A
+typical system layout is:
+
+~~~text
+/usr/include/suitesparse/cholmod.h
+/usr/lib/x86_64-linux-gnu/libcholmod.so
+~~~
+
+The build uses `pkg-config cholmod` when available and also searches standard
+system locations. Set `CHOLMOD_ROOT` for a non-standard prefix:
+
+~~~bash
+export CHOLMOD_ROOT=/path/to/suitesparse
+export LD_LIBRARY_PATH=$CHOLMOD_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+~~~
+
+The installed CHOLMOD build determines which licensed modules and algorithms
+are available. Xolky only ships its Apache-licensed adapter.
+
+For the CUDA backend, install CUDA 13 and cuDSS first.
 
 By default, the build searches `CUDA_HOME`, `/usr/local/cuda`, and standard
 system development directories. A common cuDSS installation layout is:
@@ -46,6 +70,17 @@ export LD_LIBRARY_PATH=$CUDSS_ROOT/lib64:$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD
 The build checks for `cudss.h` and the linkable `libcudss.so` and reports their
 searched paths if either is missing.
 
+Backend builds can be controlled explicitly with `auto` (the default), `on`,
+or `off`:
+
+~~~bash
+XOLKY_BUILD_CHOLMOD=on XOLKY_BUILD_CUDA=off pip install .
+XOLKY_BUILD_CHOLMOD=off XOLKY_BUILD_CUDA=on pip install ".[cuda13]"
+~~~
+
+An explicitly enabled backend fails the build when its development files are
+missing. Automatic mode simply omits unavailable backends.
+
 Once those build-time and runtime paths are configured, install Xolky:
 
 ~~~bash
@@ -72,16 +107,35 @@ import xolky
 
 jax.config.update("jax_enable_x64", True)
 
-indices = jnp.array([0, 0, 1, 2], dtype=jnp.int32)
-indptr = jnp.array([0, 1, 3, 4], dtype=jnp.int32)
-values = jnp.array([4.0, 1.0, 3.0, 2.0], dtype=jnp.float64)
-rhs = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float64)
+cpu = jax.devices("cpu")[0]
+indices = jax.device_put(jnp.array([0, 0, 1, 2], dtype=jnp.int32), cpu)
+indptr = jax.device_put(jnp.array([0, 1, 3, 4], dtype=jnp.int32), cpu)
+values = jax.device_put(
+    jnp.array([4.0, 1.0, 3.0, 2.0], dtype=jnp.float64), cpu
+)
+rhs = jax.device_put(jnp.array([1.0, 2.0, 3.0], dtype=jnp.float64), cpu)
 
-solver = xolky.setup(indices, indptr)
+solver = xolky.setup(
+    indices, indptr, ordering="auto", factorization="auto"
+)
 solver = xolky.refactor(solver, values)
 solver, solution = xolky.solve(solver, rhs)
 solver.close()
 ~~~
+
+Backend selection follows the concrete placement of `indices` and `indptr`;
+values and right-hand sides must use the same backend. CHOLMOD setup requires
+both policies to be stated explicitly:
+
+- `ordering="auto"` lets CHOLMOD choose between its ordering methods; explicit
+  choices are `"amd"`, `"metis"`, and `"nesdis"`.
+- `factorization="auto"` lets CHOLMOD choose its factor form; explicit choices
+  are `"simplicial"` and `"supernodal"`.
+
+Using `"auto"` records that the choice is intentional while allowing CHOLMOD
+to adapt it to the matrix. Available explicit methods depend on the
+user-installed CHOLMOD build. These options apply only to CPU arrays. For CUDA arrays, omit
+them and Xolky selects cuDSS.
 
 FP32 source data must be converted explicitly. The local x64 context permits
 the conversion without changing JAX's process-wide configuration:
@@ -90,7 +144,7 @@ the conversion without changing JAX's process-wide configuration:
 values_fp32 = jnp.array([4.0, 1.0, 3.0, 2.0], dtype=jnp.float32)
 rhs_fp32 = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)
 
-solver = xolky.setup(indices, indptr)
+solver = xolky.setup(indices, indptr, ordering="auto", factorization="auto")
 
 with jax.enable_x64():
     values = values_fp32.astype(jnp.float64)
@@ -102,8 +156,9 @@ with jax.enable_x64():
 solver.close()
 ~~~
 
-The complete runnable version is in
-[`examples/fp32_source.py`](examples/fp32_source.py).
+Complete runnable versions are available for
+[cuDSS](examples/fp32_source/cudss.py) and
+[CHOLMOD](examples/fp32_source/cholmod.py).
 
 Setup is a host-side resource operation and must run outside jax.jit.
 Refactor and solve accept and return the solver PyTree:
@@ -115,27 +170,42 @@ def refactor_and_solve(solver, values, rhs):
     return xolky.solve(solver, rhs)
 ~~~
 
-The solver identifier is a dynamic pinned-host uint64, so different solver
-instances with the same static dimensions reuse the same JIT compilation. A
-small internal sequence scalar establishes ordering between stateful FFI calls.
+The solver identifier is a dynamic uint64 (pinned host memory for CUDA and CPU
+memory for CHOLMOD), so different solver instances with the same static
+metadata reuse one JIT compilation. A small internal sequence scalar
+establishes ordering between stateful FFI calls.
 
 Solver states have linear semantics: after passing a state to refactor or solve,
 do not reuse the previous state. Calls using one native solver are serialized;
-different solver instances own independent CUDA streams and may run
-concurrently.
+different solver instances may run concurrently. CUDA solvers additionally own
+independent streams.
 
 `jax.vmap` is explicitly rejected. Mapping the current single-system FFI call
 would only repeat operations against one mutable native solver; it would not
-construct a cuDSS batched solver. Native batching requires its own solver
-resource and buffer layout and will be implemented separately.
+construct a native batched solver. Native batching requires its own solver
+resource and buffer layout.
 
-Call `close()` on the latest solver state to release its CUDA and cuDSS
-resources. It waits for operations ordered before that state to finish and is
-idempotent. Remaining resources are released at interpreter shutdown.
+Call `close()` on the latest solver state to release its native resources. It
+waits for operations ordered before that state to finish and is idempotent.
+Remaining resources are released at interpreter shutdown.
 
 ## Native resource model
 
-Each solver owns:
+Each CHOLMOD solver owns a `cholmod_common`, the symbolic/numeric factor, owned
+int32 structure arrays, and reusable `cholmod_solve2` solution/workspace
+objects. Lower CSR is interpreted directly as upper CSC with `stype=1`, so no
+structural transpose is performed. Refactor temporarily wraps the JAX-owned
+numeric values. Solve wraps the right-hand side directly, reuses CHOLMOD-owned
+workspace, and copies the final `n` float64 values into the JAX output.
+
+CHOLMOD ordering and factorization are selected by the policies passed to
+`setup`. The `"auto"` policies delegate those decisions to CHOLMOD; explicit
+ordering choices are AMD, METIS, and nested dissection, while explicit factor
+forms are simplicial and supernodal. Xolky always requires an LL' result so
+non-positive-definite matrices violate its SPD contract instead of being
+accepted as indefinite LDL' factorizations.
+
+Each CUDA solver owns:
 
 - a cuDSS handle, configuration, data object, and CSR matrix descriptor;
 - a dedicated non-blocking CUDA stream and synchronization events;
@@ -155,6 +225,18 @@ synchronizes the private stream, then destroys every pooled descriptor and
 event. Because the public API is float64-only, the repeated-solve path performs
 no hidden dtype conversions.
 
+## Examples
+
+Examples are grouped by scenario. Each directory contains a `cudss.py` version
+that explicitly places arrays on an NVIDIA GPU and a `cholmod.py` version that
+explicitly places arrays on a CPU. Native setup runs outside JIT because it
+creates the solver resource; refactor and solve calls are JIT-compiled.
+
+- [`fp32_source`](examples/fp32_source)
+- [`small`](examples/small)
+- [`refactor`](examples/refactor)
+- [`nd6k`](examples/nd6k)
+
 ## Benchmarking
 
 Use the repeated-solve benchmark to measure the tight coarse-solver path:
@@ -171,9 +253,10 @@ independently.
 
 ## Supported
 
-- Linux and NVIDIA CUDA GPUs
+- Linux CPU and NVIDIA CUDA devices
 - JAX 0.11.1 or newer
-- CUDA 13 and cuDSS
+- a system SuiteSparse CHOLMOD installation for CPU
+- CUDA 13 and cuDSS for NVIDIA GPUs
 - int32 CSR structure
 - float64 numeric values and right-hand sides
 - one right-hand side

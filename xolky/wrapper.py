@@ -4,42 +4,65 @@ import atexit
 import dataclasses
 import functools
 from dataclasses import field
-from typing import Any
+from typing import Any, Literal
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import ffi as jffi
 
+
+CholmodOrdering = Literal["auto", "amd", "metis", "nesdis"]
+CholmodFactorization = Literal["auto", "simplicial", "supernodal"]
+_CHOLMOD_ORDERINGS = frozenset(("auto", "amd", "metis", "nesdis"))
+_CHOLMOD_FACTORIZATIONS = frozenset(("auto", "simplicial", "supernodal"))
+
 try:
-    from . import _xolky
+    from . import _xolky_cuda
 except ImportError as error:
-    if "cudss" not in str(error).lower():
-        raise
-    raise ImportError(
-        "Xolky could not load cuDSS. Ensure libcuDSS and its dependencies are "
-        "visible to the dynamic loader, for example through LD_LIBRARY_PATH."
-    ) from error
+    _xolky_cuda = None
+    _cuda_import_error = error
+else:
+    _cuda_import_error = None
 
+try:
+    from . import _xolky_cholmod
+except ImportError as error:
+    _xolky_cholmod = None
+    _cholmod_import_error = error
+else:
+    _cholmod_import_error = None
 
-jffi.register_ffi_target("xolky_setup", _xolky.setup(), platform="CUDA")
-jffi.register_ffi_target("xolky_refactor", _xolky.refactor(), platform="CUDA")
-jffi.register_ffi_target("xolky_solve", _xolky.solve(), platform="CUDA")
+if _xolky_cuda is not None:
+    jffi.register_ffi_target("xolky_setup", _xolky_cuda.setup(), platform="CUDA")
+    jffi.register_ffi_target(
+        "xolky_refactor", _xolky_cuda.refactor(), platform="CUDA"
+    )
+    jffi.register_ffi_target("xolky_solve", _xolky_cuda.solve(), platform="CUDA")
+    atexit.register(_xolky_cuda.shutdown)
 
-atexit.register(_xolky.shutdown)
+if _xolky_cholmod is not None:
+    jffi.register_ffi_target(
+        "xolky_setup", _xolky_cholmod.setup(), platform="cpu"
+    )
+    jffi.register_ffi_target(
+        "xolky_refactor", _xolky_cholmod.refactor(), platform="cpu"
+    )
+    jffi.register_ffi_target(
+        "xolky_solve", _xolky_cholmod.solve(), platform="cpu"
+    )
+    atexit.register(_xolky_cholmod.shutdown)
 
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class SparseCholesky:
-    """A linear handle to a native cuDSS sparse Cholesky factorization.
-    solver_id is a dynamic pinned-host identifier. sequence is an internal JAX
-    dependency value,
-    which injects linear dependencies in the computation graph
-    of multiple solver refactor/solve calls.
-    The remaining fields are immutable shape/device metadata
-    and therefore participate in JIT caching. Previous values of a solver must
-    not be reused after calling refactor or solve.
+    """A linear handle to a native sparse Cholesky factorization.
+
+    ``solver_id`` is a dynamic native-resource identifier and ``sequence``
+    injects dependencies between stateful FFI calls. The remaining fields are
+    immutable backend/shape metadata and participate in JIT caching. Previous
+    values of a solver must not be reused after calling refactor or solve.
     """
 
     solver_id: jax.Array
@@ -47,11 +70,27 @@ class SparseCholesky:
     n: int = field(metadata={"static": True})
     nnz: int = field(metadata={"static": True})
     device_ordinal: int = field(metadata={"static": True})
+    backend: Literal["cuda", "cholmod"] = field(metadata={"static": True})
+    ordering: CholmodOrdering | None = field(metadata={"static": True})
+    factorization: CholmodFactorization | None = field(metadata={"static": True})
 
     def close(self) -> None:
-        """Wait for pending operations and release the native resources."""
+        """Wait for pending operations and release native resources."""
         jax.block_until_ready(self.sequence)
-        _xolky.destroy_solver(_concrete_solver_id(self))
+        _backend_module(self.backend).destroy_solver(_concrete_solver_id(self))
+
+
+def _backend_module(backend: Literal["cuda", "cholmod"]):
+    if backend == "cuda":
+        module = _xolky_cuda
+        error = _cuda_import_error
+    else:
+        module = _xolky_cholmod
+        error = _cholmod_import_error
+    if module is None:
+        detail = f": {error}" if error is not None else ""
+        raise RuntimeError(f"xolky {backend} backend is unavailable{detail}")
+    return module
 
 
 def _concrete_solver_id(solver: SparseCholesky) -> int:
@@ -104,10 +143,11 @@ def _solve_call(n: int):
         input_output_aliases={1: 0},
     )
 
+
 def _vmap_not_supported(operation: str) -> None:
     raise NotImplementedError(
         f"xolky.{operation} does not support jax.vmap; use an explicitly "
-        "constructed native cuDSS batched solver instead"
+        "constructed native batched solver instead"
     )
 
 
@@ -145,6 +185,7 @@ def _solve_ffi(n: int):
 
     return call
 
+
 def _as_structure_array(value: Any, name: str) -> jax.Array:
     array = jnp.asarray(value)
     if array.ndim != 1:
@@ -162,11 +203,21 @@ def _array_device(array: jax.Array) -> jax.Device:
         )
     devices = array.devices()
     if len(devices) != 1:
-        raise ValueError("xolky arrays must be placed on exactly one CUDA device")
+        raise ValueError("xolky arrays must be placed on exactly one device")
     device = next(iter(devices))
-    if device.platform != "gpu":
-        raise ValueError("xolky requires arrays placed on a CUDA device")
+    _device_backend(device)
     return device
+
+
+def _device_backend(device: jax.Device) -> Literal["cuda", "cholmod"]:
+    if device.platform == "cpu":
+        return "cholmod"
+    platform_version = getattr(device.client, "platform_version", "").lower()
+    if device.platform == "gpu" and "cuda" in platform_version:
+        return "cuda"
+    raise ValueError(
+        f"xolky supports JAX CPU and NVIDIA CUDA devices, not {device}"
+    )
 
 
 def _validate_solver(solver: SparseCholesky) -> None:
@@ -177,15 +228,36 @@ def _validate_solver(solver: SparseCholesky) -> None:
         raise ValueError("solver_id must be scalar")
     if solver_id_type.dtype != np.dtype(np.uint64):
         raise TypeError("solver_id must have dtype uint64")
-    if getattr(solver_id_type.memory_space, "name", None) != "Host":
+    if solver.backend not in ("cuda", "cholmod"):
+        raise ValueError(f"unknown xolky backend {solver.backend!r}")
+    if solver.backend == "cholmod":
+        if solver.ordering not in _CHOLMOD_ORDERINGS:
+            raise ValueError("a CHOLMOD solver must have an explicit ordering")
+        if solver.factorization not in _CHOLMOD_FACTORIZATIONS:
+            raise ValueError("a CHOLMOD solver must have a factorization policy")
+    elif solver.ordering is not None or solver.factorization is not None:
+        raise ValueError("a CUDA solver cannot have CHOLMOD policies")
+    if (
+        solver.backend == "cuda"
+        and getattr(solver_id_type.memory_space, "name", None) != "Host"
+    ):
         raise ValueError("solver_id must be stored in pinned host memory")
 
 
-def setup(csr_indices: Any, csr_indptr: Any) -> SparseCholesky:
+def setup(
+    csr_indices: Any,
+    csr_indptr: Any,
+    *,
+    ordering: CholmodOrdering | None = None,
+    factorization: CholmodFactorization | None = None,
+) -> SparseCholesky:
     """Create, reorder, and symbolically analyze an SPD CSR matrix structure.
 
     Setup is a host-side resource operation and must be called outside jit.
-    The CSR structure is copied into solver-owned device storage.
+    The CSR structure is copied into backend-owned storage. CPU arrays require
+    explicit CHOLMOD ordering and factorization policies. Each policy accepts
+    ``auto`` or an explicit algorithm: ``amd``/``metis``/``nesdis`` and
+    ``simplicial``/``supernodal``, respectively.
     """
 
     indices = _as_structure_array(csr_indices, "csr_indices")
@@ -198,16 +270,49 @@ def setup(csr_indices: Any, csr_indptr: Any) -> SparseCholesky:
     if indices_device != indptr_device:
         raise ValueError("csr_indices and csr_indptr must be on the same device")
 
+    backend = _device_backend(indices_device)
+    if backend == "cholmod":
+        if ordering is None:
+            raise TypeError(
+                "ordering is required for CHOLMOD setup; choose auto, amd, "
+                "metis, or nesdis"
+            )
+        if factorization is None:
+            raise TypeError(
+                "factorization is required for CHOLMOD setup; choose auto, "
+                "simplicial, or supernodal"
+            )
+        if ordering not in _CHOLMOD_ORDERINGS:
+            raise ValueError("ordering must be auto, amd, metis, or nesdis")
+        if factorization not in _CHOLMOD_FACTORIZATIONS:
+            raise ValueError(
+                "factorization must be auto, simplicial, or supernodal"
+            )
+    elif ordering is not None or factorization is not None:
+        raise ValueError(
+            "ordering and factorization are only valid for the CHOLMOD CPU "
+            "backend"
+        )
+
+    native_module = _backend_module(backend)
     n = indptr.shape[0] - 1
     nnz = indices.shape[0]
-    native_id = _xolky.create_solver(n, nnz, indices_device.id)
+    native_id = (
+        native_module.create_solver(
+            n, nnz, indices_device.id, ordering, factorization
+        )
+        if backend == "cholmod"
+        else native_module.create_solver(n, nnz, indices_device.id)
+    )
 
     try:
         with jax.enable_x64():
-            solver_id = jax.device_put(
-                np.uint64(native_id),
-                _host_sharding(indices_device.id),
+            solver_id_target = (
+                _host_sharding(indices_device.id)
+                if backend == "cuda"
+                else indices_device
             )
+            solver_id = jax.device_put(np.uint64(native_id), solver_id_target)
             sequence_seed = jax.device_put(np.uint8(0), indices_device)
             sequence = _setup_call()(
                 solver_id,
@@ -217,7 +322,7 @@ def setup(csr_indices: Any, csr_indptr: Any) -> SparseCholesky:
             )
         jax.block_until_ready(sequence)
     except Exception:
-        _xolky.destroy_solver(native_id)
+        native_module.destroy_solver(native_id)
         raise
 
     return SparseCholesky(
@@ -226,6 +331,9 @@ def setup(csr_indices: Any, csr_indptr: Any) -> SparseCholesky:
         n=n,
         nnz=nnz,
         device_ordinal=indices_device.id,
+        backend=backend,
+        ordering=ordering,
+        factorization=factorization,
     )
 
 

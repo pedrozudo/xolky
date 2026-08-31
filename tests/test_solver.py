@@ -6,9 +6,12 @@ import numpy as np
 import pytest
 
 import xolky
-from xolky import _xolky
+from xolky.wrapper import _xolky_cuda as _xolky
 
 from ._problems import VALUES_1, VALUES_2, dense, device_problem
+
+
+pytestmark = pytest.mark.cuda
 
 
 def test_factorize_and_solve_matches_dense():

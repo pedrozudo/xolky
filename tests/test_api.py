@@ -4,9 +4,12 @@ import numpy as np
 import pytest
 
 import xolky
-from xolky import _xolky
+from xolky.wrapper import _xolky_cuda as _xolky
 
 from ._problems import device_problem
+
+
+pytestmark = pytest.mark.cuda
 
 
 def test_public_api_is_functional():
@@ -30,6 +33,9 @@ def test_solver_is_a_pytree_with_dynamic_runtime_state():
         assert "SparseCholesky" in str(tree)
         assert solver.n == 4
         assert solver.nnz == 8
+        assert solver.backend == "cuda"
+        assert solver.ordering is None
+        assert solver.factorization is None
         assert jax.typeof(solver.solver_id).memory_space.name == "Host"
         assert jax.typeof(solver.sequence).memory_space.name == "Device"
         assert solver.sequence.devices() == indices.devices()
@@ -78,6 +84,14 @@ def test_setup_allocates_unique_ids_and_close_releases_resources():
 def test_setup_validates_structure(indices, indptr, error, message):
     with pytest.raises(error, match=message):
         xolky.setup(indices, indptr)
+
+
+def test_cuda_setup_rejects_cholmod_policies():
+    indices, indptr, _, _ = device_problem()
+    with pytest.raises(ValueError, match="only valid for the CHOLMOD"):
+        xolky.setup(
+            indices, indptr, ordering="auto", factorization="auto"
+        )
 
 
 def test_setup_cannot_run_under_jax_transformations():
