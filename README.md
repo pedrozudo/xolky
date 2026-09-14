@@ -34,7 +34,7 @@ export LD_LIBRARY_PATH=$CHOLMOD_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 The installed CHOLMOD build determines which licensed modules and algorithms
 are available. Xolky only ships its Apache-licensed adapter.
 
-For the CUDA backend, install CUDA 13 and cuDSS first.
+For the CUDA backend, install CUDA 13 and cuDSS 0.8.0 or newer first.
 
 By default, the build searches `CUDA_HOME`, `/usr/local/cuda`, and standard
 system development directories. A common cuDSS installation layout is:

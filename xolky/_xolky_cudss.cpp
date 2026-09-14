@@ -5,6 +5,10 @@
 #include <cudss.h>
 #include <pybind11/pybind11.h>
 
+#if CUDSS_VERSION < 800
+#error "Xolky requires cuDSS 0.8.0 or newer"
+#endif
+
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -84,10 +88,10 @@ struct SolveSlot {
     CheckCuda(cudaEventCreateWithFlags(&completed, cudaEventDisableTiming),
               "cudaEventCreateWithFlags(solve_slot.completed)");
     CheckCudss(cudssMatrixCreateDn(&rhs_matrix, n, 1, n, rhs_values,
-                                   CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR),
+                                   CUDSS_R_64F, CUDSS_LAYOUT_COL_MAJOR),
                "cudssMatrixCreateDn(solve_slot.rhs)");
     CheckCudss(cudssMatrixCreateDn(&solution_matrix, n, 1, n,
-                                   solution_values, CUDA_R_64F,
+                                   solution_values, CUDSS_R_64F,
                                    CUDSS_LAYOUT_COL_MAJOR),
                "cudssMatrixCreateDn(solve_slot.solution)");
   }
@@ -157,9 +161,9 @@ struct SolverEntry {
 
     CheckCudss(
         cudssMatrixCreateCsr(&matrix, n, n, nnz, csr_indptr, nullptr,
-                             csr_indices, csr_values, CUDA_R_32I, CUDA_R_64F,
-                             CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER,
-                             CUDSS_BASE_ZERO),
+                             csr_indices, csr_values, CUDSS_R_32I,
+                             CUDSS_R_32I, CUDSS_R_64F, CUDSS_MTYPE_SPD,
+                             CUDSS_MVIEW_LOWER, CUDSS_BASE_ZERO),
         "cudssMatrixCreateCsr");
   }
 
@@ -485,7 +489,7 @@ ffi::Error SetupImpl(
                               cudaMemcpyDeviceToDevice, entry->stream),
               "cudaMemcpyAsync(csr_indptr)");
 
-    cudssAlgType_t reorder_algorithm = CUDSS_ALG_DEFAULT;
+    cudssReorderingAlg_t reorder_algorithm = CUDSS_REORDERING_ALG_DEFAULT;
     CheckCudss(cudssConfigSet(entry->config, CUDSS_CONFIG_REORDERING_ALG,
                               &reorder_algorithm, sizeof(reorder_algorithm)),
                "cudssConfigSet(CUDSS_CONFIG_REORDERING_ALG)");
