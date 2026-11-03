@@ -19,9 +19,7 @@ CHOLMOD_ROOT = Path(_configured_cholmod_root) if _configured_cholmod_root else N
 
 def _build_mode(variable):
     value = os.environ.get(variable, "auto").lower()
-    value = {"1": "on", "true": "on", "0": "off", "false": "off"}.get(
-        value, value
-    )
+    value = {"1": "on", "true": "on", "0": "off", "false": "off"}.get(value, value)
     if value not in {"auto", "on", "off"}:
         raise RuntimeError(f"{variable} must be one of auto, on, or off")
     return value
@@ -73,10 +71,23 @@ def _cudss_candidates():
         )
 
     prefixes = (CUDA_ROOT, Path("/usr/local/cuda"))
-    headers = [prefix / "include" / "cudss.h" for prefix in prefixes]
+
+    # Detect CUDA major version, e.g. cuda-13.0 -> 13.
+    cuda_major = CUDA_ROOT.resolve().name.split("-")[-1].split(".")[0]
+
+    # NVIDIA APT installation paths (CUDA 12 and CUDA 13).
+    headers = [
+        Path(f"/usr/include/libcudss/{cuda_major}/cudss.h"),
+    ]
+
+    libraries = [
+        Path(f"/usr/lib/x86_64-linux-gnu/libcudss/{cuda_major}/libcudss.so"),
+    ]
+
+    # Standard CUDA installation paths.
+    headers.extend(prefix / "include" / "cudss.h" for prefix in prefixes)
     headers.append(Path("/usr/include/cudss.h"))
 
-    libraries = []
     for prefix in prefixes:
         libraries.extend(
             (
@@ -85,6 +96,7 @@ def _cudss_candidates():
             )
         )
 
+    # Standard Linux library directories.
     multiarch = sysconfig.get_config_var("MULTIARCH")
     if multiarch:
         libraries.extend(
@@ -93,6 +105,7 @@ def _cudss_candidates():
                 Path("/lib") / multiarch / "libcudss.so",
             )
         )
+
     libraries.extend(
         (
             Path("/usr/lib64/libcudss.so"),
@@ -100,6 +113,7 @@ def _cudss_candidates():
             Path("/usr/local/lib/libcudss.so"),
         )
     )
+
     return tuple(headers), tuple(libraries)
 
 
@@ -196,9 +210,7 @@ class XolkyBuildExt(build_ext):
                 f"{searched}\n"
                 "Install cuDSS or set CUDSS_ROOT to its installation prefix."
             )
-        if CHOLMOD_REQUESTED and (
-            CHOLMOD_HEADER is None or CHOLMOD_LIBRARY is None
-        ):
+        if CHOLMOD_REQUESTED and (CHOLMOD_HEADER is None or CHOLMOD_LIBRARY is None):
             searched = "\n".join(
                 f"  - {path}"
                 for path in (
