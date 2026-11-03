@@ -10,91 +10,111 @@ Xolky separates the solver lifecycle into three operations:
 
 ## Installation
 
-Xolky supports CPU solves through SuiteSparse CHOLMOD and GPU solves through NVIDIA cuDSS. Each backend is built only when its development files are available. Both libraries are dynamically linked and are not bundled with Xolky.
+Xolky supports sparse Cholesky factorization through SuiteSparse CHOLMOD on CPU and NVIDIA cuDSS on GPU. Both backends are compiled from source and dynamically linked to their system libraries.
 
 ### CPU (CHOLMOD)
 
-Install SuiteSparse/CHOLMOD development files:
+On Ubuntu or Debian, install SuiteSparse and the required build tools:
 
 ```bash
-sudo apt update
-sudo apt install build-essential libsuitesparse-dev
+sudo apt-get update
+sudo apt-get install -y build-essential libsuitesparse-dev
+```
+
+Install JAX and the Python build dependencies:
+
+```bash
+python -m pip install "jax>=0.11.1" setuptools wheel pybind11
 ```
 
 Install Xolky with the CPU backend:
 
 ```bash
 XOLKY_BUILD_CHOLMOD=on XOLKY_BUILD_CUDA=off \
-pip install git+ssh://git@github.com/pedrozudo/xolky.git
+python -m pip install --no-build-isolation \
+git+ssh://git@github.com/pedrozudo/xolky.git
 ```
 
-For non-standard installations, specify the SuiteSparse installation prefix:
+Xolky automatically detects SuiteSparse through `pkg-config` and standard system installation paths.
+
+### GPU (CUDA + cuDSS)
+
+Install a compatible NVIDIA driver and CUDA 13 toolkit following the [NVIDIA CUDA installation guide](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/).
+
+After configuring NVIDIA's CUDA APT repository, install cuDSS:
 
 ```bash
-export CHOLMOD_ROOT=/path/to/suitesparse
+sudo apt-get update
+sudo apt-get install -y libcudss1-cuda-13 libcudss1-dev-cuda-13
 ```
 
-Xolky uses `pkg-config cholmod` when available and also searches standard system locations.
-
-The installed CHOLMOD build determines which licensed modules and algorithms are available. Xolky only ships its Apache-licensed adapter.
-
-### GPU (cuDSS)
-
-Install CUDA 12 or 13 using the [NVIDIA CUDA installation guide](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/).
-
-Configure the [NVIDIA CUDA APT repository](https://developer.nvidia.com/cuda-downloads) for your Ubuntu version, then install cuDSS.
-
-For CUDA 13:
+Install JAX with CUDA 13 support and the Python build dependencies:
 
 ```bash
-sudo apt update
-sudo apt install libcudss1-cuda-13 libcudss1-dev-cuda-13
-```
-
-For CUDA 12:
-
-```bash
-sudo apt update
-sudo apt install libcudss1-cuda-12 libcudss1-dev-cuda-12
+python -m pip install "jax[cuda13]>=0.11.1" setuptools wheel pybind11
 ```
 
 Install Xolky with the GPU backend:
 
 ```bash
 XOLKY_BUILD_CUDA=on XOLKY_BUILD_CHOLMOD=off \
-pip install git+ssh://git@github.com/pedrozudo/xolky.git
+python -m pip install --no-build-isolation \
+git+ssh://git@github.com/pedrozudo/xolky.git
 ```
 
-Xolky automatically detects cuDSS installed in NVIDIA's standard APT directories.
+Xolky automatically detects cuDSS installed through NVIDIA's APT packages and embeds the cuDSS library directory in the compiled extension, so no manual runtime library configuration is required.
 
-For non-standard installations, specify the CUDA and cuDSS installation prefixes:
+The `--no-build-isolation` option ensures that Xolky compiles against the `jaxlib` version installed in the current Python environment.
+
+### Custom installation paths
+
+For non-standard CUDA, cuDSS, or SuiteSparse installations, specify their installation prefixes:
 
 ```bash
 export CUDA_HOME=/path/to/cuda
 export CUDSS_ROOT=/path/to/cudss
+export CHOLMOD_ROOT=/path/to/suitesparse
 ```
 
-Then install Xolky using the same command above.
+Set only the variables relevant to the backends being built.
 
-At runtime, the CUDA and cuDSS shared libraries must be accessible to the dynamic linker. If necessary, configure `LD_LIBRARY_PATH` accordingly.
+Xolky uses the detected cuDSS library directory as its runtime search path. The libraries must remain available at that location after installation.
+
+### Build configuration
+
+Backend builds can be controlled using `XOLKY_BUILD_CHOLMOD` and `XOLKY_BUILD_CUDA`. Both accept `auto` (default), `on`, or `off`.
+
+An explicitly enabled backend fails the build if its development files are unavailable. Automatic mode omits unavailable backends.
 
 ### Development
 
-Clone the repository and install Xolky in editable mode:
+Clone the repository:
 
 ```bash
 git clone git@github.com:pedrozudo/xolky.git
 cd xolky
-pip install -e ".[test]"
+```
+
+Install JAX and the build and test dependencies:
+
+```bash
+python -m pip install "jax[cuda13]>=0.11.1" setuptools wheel pybind11 pytest
+```
+
+Build both backends in editable mode:
+
+```bash
+XOLKY_BUILD_CUDA=on XOLKY_BUILD_CHOLMOD=on \
+python -m pip install --no-build-isolation -e ".[test]"
 ```
 
 Run the tests:
 
 ```bash
-pytest
+python -m pytest -v
 ```
 
-Backend builds can be controlled through `XOLKY_BUILD_CHOLMOD` and `XOLKY_BUILD_CUDA`, each accepting `auto` (default), `on`, or `off`. Explicitly enabled backends fail the build if their development files are missing.
+The development example assumes that both CUDA/cuDSS and SuiteSparse are installed. To develop with only one backend, set the other backend to `off`.
 
 ## Linear functional API
 

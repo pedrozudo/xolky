@@ -247,6 +247,7 @@ if BUILD_CUDA:
                 os.fspath(CUDSS_LIBRARY.parent),
             ],
             libraries=["cudart", "cudss"],
+            runtime_library_dirs=[str(CUDSS_LIBRARY.parent)],
             language="c++",
             extra_compile_args=common_compile_args,
         )
